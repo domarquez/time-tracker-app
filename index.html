@@ -15,7 +15,7 @@
 
         <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
 
-        <!-- Login -->
+        <!-- LOGIN -->
         <div id="login-screen">
             <div class="space-y-5">
                 <input id="phone" type="tel" placeholder="Número de Teléfono" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
@@ -23,22 +23,22 @@
                 
                 <button onclick="loginUser()" class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
                 
-                <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
+                <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg">👑 Administrador</button>
 
-                <!-- Botón Instalar como App -->
-                <button onclick="installPWA()" id="installBtn" 
-                        class="w-full bg-emerald-600 hover:bg-emerald-700 py-3 rounded-2xl text-sm hidden flex items-center justify-center gap-2">
-                    📲 Instalar en Pantalla de Inicio
+                <!-- Botón Instalar -->
+                <button onclick="showInstallInstructions()" 
+                        class="w-full bg-emerald-600 hover:bg-emerald-700 py-4 rounded-3xl text-sm font-medium flex items-center justify-center gap-2">
+                    📲 Instalar App en Celular
                 </button>
             </div>
         </div>
 
-        <!-- Pantalla Trabajador -->
+        <!-- PANTALLA TRABAJADOR -->
         <div id="user-screen" class="hidden space-y-6">
             <div class="text-center">
                 <div id="greeting" class="text-2xl font-bold text-blue-300"></div>
-                <div id="status" class="text-green-400 text-2xl mt-4">Listo</div>
-                <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
+                <div id="status" class="text-green-400 text-2xl mt-4">Listo para trabajar</div>
+                <div id="timer" class="clock text-blue-400 mt-8">00:00:00</div>
             </div>
 
             <div class="flex gap-4">
@@ -55,40 +55,28 @@
             <button onclick="logout()" class="w-full bg-red-500 py-3 rounded-2xl">Cerrar Sesión</button>
         </div>
 
-        <!-- Pantalla Admin -->
+        <!-- PANTALLA ADMIN -->
         <div id="admin-screen" class="hidden">
-            <h2 class="text-2xl font-bold text-center mb-6 text-purple-400">👑 Panel Administrador</h2>
-            <div id="users-list" class="space-y-4 max-h-[60vh] overflow-auto"></div>
+            <h2 class="text-2xl font-bold text-center mb-6 text-purple-400">👑 Panel de Administrador</h2>
+            <div id="users-list" class="space-y-4 max-h-[65vh] overflow-auto"></div>
             <button onclick="logout()" class="mt-6 w-full bg-red-500 py-4 rounded-2xl">Cerrar Sesión</button>
         </div>
     </div>
 
     <script>
-        let deferredPrompt;
         let currentUserId = null;
         let currentEntryId = null;
         let timerInterval = null;
         let startTime = null;
 
-        // Detecta si se puede instalar
-        window.addEventListener('beforeinstallprompt', (e) => {
-            deferredPrompt = e;
-            document.getElementById('installBtn').classList.remove('hidden');
-        });
-
-        async function installPWA() {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                await deferredPrompt.userChoice;
-                deferredPrompt = null;
-                document.getElementById('installBtn').classList.add('hidden');
-            }
+        function showInstallInstructions() {
+            alert("📲 Cómo instalar la App:\n\n1. Toca los 3 puntos ⋮ (arriba a la derecha)\n2. Selecciona 'Agregar a pantalla de inicio' o 'Instalar'\n3. Confirma\n\n¡Listo! La app quedará en tu pantalla como cualquier otra.");
         }
 
         async function loginUser() {
             const phone = document.getElementById('phone').value.trim();
             const name = document.getElementById('name').value.trim() || phone;
-            if (!phone) return alert("Ingresa tu número de teléfono");
+            if (!phone) return alert("Por favor ingresa tu número de teléfono");
 
             const res = await fetch('/register', {
                 method: 'POST',
@@ -105,12 +93,12 @@
         }
 
         function loginAsAdmin() {
-            if (prompt("🔑 Contraseña de Administrador:") === "admin") {
+            if (prompt("🔑 Ingresa contraseña de administrador:") === "admin") {
                 document.getElementById('login-screen').classList.add('hidden');
                 document.getElementById('admin-screen').classList.remove('hidden');
                 loadAllUsers();
             } else {
-                alert("Contraseña incorrecta");
+                alert("❌ Contraseña incorrecta");
             }
         }
 
@@ -180,9 +168,9 @@
         window.onload = () => {
             const savedId = localStorage.getItem('currentUserId');
             const savedName = localStorage.getItem('currentUserName');
-            if (savedId && savedName) {
+            if (savedId) {
                 currentUserId = parseInt(savedId);
-                showUserScreen(savedName);
+                showUserScreen(savedName || "Usuario");
             }
         };
     </script>
