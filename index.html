@@ -7,31 +7,68 @@
     <title>Control de Horas</title>
     <link rel="manifest" href="/manifest.json">
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; }
+        .clock { font-size: 4rem; font-weight: bold; }
+    </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
     <div class="max-w-md w-full bg-gray-800 p-8 rounded-3xl shadow-2xl">
 
         <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
 
+        <!-- LOGIN -->
         <div id="login-screen" class="space-y-5">
             <input id="phone" type="tel" placeholder="Número de Teléfono" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
             <input id="name" type="text" placeholder="Nombre (opcional)" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
             
-            <button onclick="loginUser()" class="w-full bg-blue-600 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
+            <button onclick="loginUser()" class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
             
-            <button onclick="loginAsAdmin()" class="w-full bg-purple-600 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
+            <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
 
-            <button onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 py-4 rounded-3xl text-sm hidden">
+            <button onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-4 rounded-3xl text-sm hidden">
                 📲 Instalar App
             </button>
         </div>
 
-        <!-- Pantallas de usuario y admin aquí (copia el resto del código anterior si lo necesitas) -->
+        <!-- USER SCREEN -->
+        <div id="user-screen" class="hidden space-y-6">
+            <div class="text-center">
+                <div id="greeting" class="text-2xl font-bold text-blue-300"></div>
+                <div id="status" class="text-green-400 text-2xl mt-4">Listo para trabajar</div>
+                <div id="timer" class="clock text-blue-400 mt-8">00:00:00</div>
+            </div>
 
+            <div class="flex gap-4">
+                <button onclick="startTimer()" id="startBtn" class="flex-1 bg-green-600 py-6 rounded-3xl text-2xl font-bold">EMPEZAR</button>
+                <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 py-6 rounded-3xl text-2xl font-bold">DETENER</button>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
+                <div><div class="text-gray-400">HOY</div><div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div></div>
+                <div><div class="text-gray-400">SEMANA</div><div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div></div>
+            </div>
+
+            <button onclick="showHistory()" class="w-full bg-gray-600 py-4 rounded-2xl">Ver Historial</button>
+            <button onclick="logout()" class="w-full bg-red-500 py-3 rounded-2xl">Cerrar Sesión</button>
+        </div>
+
+        <!-- ADMIN SCREEN -->
+        <div id="admin-screen" class="hidden">
+            <h2 class="text-2xl font-bold text-center mb-6 text-purple-400">👑 Panel de Administrador</h2>
+            <div id="users-list" class="space-y-4 max-h-[65vh] overflow-auto"></div>
+            <button onclick="logout()" class="mt-6 w-full bg-red-500 py-4 rounded-2xl">Cerrar Sesión</button>
+        </div>
     </div>
 
     <script>
+        let currentUserId = null;
+        let currentEntryId = null;
+        let timerInterval = null;
+        let startTime = null;
         let deferredPrompt;
+
+        // PWA Install
         window.addEventListener('beforeinstallprompt', (e) => {
             deferredPrompt = e;
             document.getElementById('installBtn').classList.remove('hidden');
@@ -46,11 +83,111 @@
             }
         }
 
+        // Service Worker
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').catch(console.error);
         }
 
-        // Resto de funciones...
+        async function loginUser() {
+            const phone = document.getElementById('phone').value.trim();
+            const name = document.getElementById('name').value.trim() || phone;
+            if (!phone) return alert("Ingresa tu número de teléfono");
+
+            const res = await fetch('/register', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+            });
+            const data = await res.json();
+            if (data.success) {
+                currentUserId = data.user_id;
+                localStorage.setItem('currentUserId', currentUserId);
+                localStorage.setItem('currentUserName', name);
+                showUserScreen(name);
+            }
+        }
+
+        function loginAsAdmin() {
+            if (prompt("🔑 Contraseña de Administrador:") === "admin") {
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('admin-screen').classList.remove('hidden');
+                loadAllUsers();
+            } else {
+                alert("Contraseña incorrecta");
+            }
+        }
+
+        function showUserScreen(name) {
+            document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('user-screen').classList.remove('hidden');
+            document.getElementById('greeting').textContent = name;
+            loadStats();
+        }
+
+        async function loadAllUsers() {
+            const res = await fetch('/all-users');
+            const users = await res.json();
+            document.getElementById('users-list').innerHTML = users.map(u => `
+                <div class="bg-gray-700 p-5 rounded-2xl">
+                    <div class="font-bold">${u.name}</div>
+                    <div class="text-green-400">${(u.total_minutes/60).toFixed(2)} horas</div>
+                </div>
+            `).join('');
+        }
+
+        async function startTimer() {
+            const res = await fetch('/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({user_id: currentUserId})});
+            const data = await res.json();
+            if (data.success) {
+                currentEntryId = data.entry_id;
+                startTime = Date.now();
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                timerInterval = setInterval(updateTimer, 1000);
+            }
+        }
+
+        function updateTimer() {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+            const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+            const s = (elapsed % 60).toString().padStart(2, '0');
+            document.getElementById('timer').textContent = `${h}:${m}:${s}`;
+        }
+
+        async function stopTimer() {
+            const res = await fetch('/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entry_id: currentEntryId})});
+            const data = await res.json();
+            if (data.success) {
+                clearInterval(timerInterval);
+                document.getElementById('timer').textContent = '00:00:00';
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+                loadStats();
+            }
+        }
+
+        async function loadStats() {
+            const d = await fetch(`/daily/${currentUserId}`);
+            document.getElementById('daily').textContent = (await d.json()).daily_hours + ' h';
+            const w = await fetch(`/weekly/${currentUserId}`);
+            document.getElementById('weekly').textContent = (await w.json()).weekly_hours + ' h';
+        }
+
+        function logout() {
+            localStorage.clear();
+            location.reload();
+        }
+
+        // Auto-login
+        window.onload = () => {
+            const savedId = localStorage.getItem('currentUserId');
+            const savedName = localStorage.getItem('currentUserName');
+            if (savedId) {
+                currentUserId = parseInt(savedId);
+                showUserScreen(savedName || "Usuario");
+            }
+        };
     </script>
 </body>
 </html>
