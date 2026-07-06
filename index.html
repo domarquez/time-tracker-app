@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Control de Horas - Diego Tracker</title>
+    <title>Control de Horas</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
@@ -15,62 +15,57 @@
     <div class="max-w-md w-full bg-gray-800 p-8 rounded-3xl shadow-2xl">
         <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
         
-        <!-- Pantalla de Login -->
-        <div id="login" class="space-y-4">
-            <input id="name" type="text" placeholder="Tu Nombre Completo" 
-                   class="w-full p-4 bg-gray-700 rounded-2xl text-xl focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <button onclick="registerUser()" 
-                    class="w-full bg-blue-600 hover:bg-blue-700 py-4 rounded-2xl text-xl font-semibold transition">
-                    Registrarse / Ingresar
-            </button>
+        <!-- Login Normal / Admin -->
+        <div id="login-screen">
+            <div class="space-y-4">
+                <input id="username" type="text" placeholder="Nombre de usuario" 
+                       class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
+                <input id="password" type="password" placeholder="Contraseña (solo admin)" 
+                       class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
+                <button onclick="handleLogin()" 
+                        class="w-full bg-blue-600 hover:bg-blue-700 py-4 rounded-2xl text-xl font-semibold">
+                        Entrar
+                </button>
+            </div>
         </div>
 
-        <!-- Pantalla Principal -->
-        <div id="main" class="hidden space-y-6">
+        <!-- Pantalla Usuario Normal -->
+        <div id="user-screen" class="hidden space-y-6">
+            <!-- ... (el contenido anterior de usuario) ... -->
             <div class="text-center">
-                <div id="status" class="text-green-400 text-2xl font-semibold mb-2">Listo para empezar</div>
+                <div id="status" class="text-green-400 text-2xl font-semibold mb-2">Listo</div>
                 <div id="timer" class="clock text-blue-400">00:00:00</div>
-                <div id="current-date" class="text-gray-400 mt-2 text-lg"></div>
+                <div id="current-date" class="text-gray-400 mt-2"></div>
             </div>
 
             <div class="flex gap-4">
-                <button onclick="startTimer()" id="startBtn"
-                        class="flex-1 bg-green-600 hover:bg-green-700 py-6 rounded-3xl text-2xl font-bold transition">
-                    EMPEZAR
-                </button>
-                <button onclick="stopTimer()" id="stopBtn" disabled
-                        class="flex-1 bg-red-600 hover:bg-red-700 py-6 rounded-3xl text-2xl font-bold transition">
-                    DETENER
-                </button>
+                <button onclick="startTimer()" id="startBtn" class="flex-1 bg-green-600 hover:bg-green-700 py-6 rounded-3xl text-2xl font-bold">EMPEZAR</button>
+                <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 hover:bg-red-700 py-6 rounded-3xl text-2xl font-bold">DETENER</button>
             </div>
 
             <div class="grid grid-cols-2 gap-4 text-center bg-gray-700 p-6 rounded-3xl">
-                <div>
-                    <div class="text-sm text-gray-400">HOY</div>
-                    <div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div>
-                </div>
-                <div>
-                    <div class="text-sm text-gray-400">SEMANA</div>
-                    <div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div>
-                </div>
+                <div><div class="text-sm text-gray-400">HOY</div><div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div></div>
+                <div><div class="text-sm text-gray-400">SEMANA</div><div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div></div>
             </div>
 
-            <button onclick="showHistory()" 
-                    class="w-full bg-gray-600 hover:bg-gray-500 py-4 rounded-2xl text-lg font-medium">
-                    📋 Ver Historial
-            </button>
+            <button onclick="showHistory()" class="w-full bg-gray-600 hover:bg-gray-500 py-4 rounded-2xl">📋 Ver Mi Historial</button>
+            <button onclick="logout()" class="w-full bg-red-500 hover:bg-red-600 py-3 rounded-2xl text-sm">Cerrar Sesión</button>
         </div>
 
-        <!-- Modal Historial -->
-        <div id="history-modal" class="hidden fixed inset-0 bg-black/90 flex items-center justify-center z-50">
-            <div class="bg-gray-800 p-6 rounded-3xl max-w-md w-full max-h-[85vh] overflow-auto">
-                <h2 class="text-2xl font-bold mb-4 text-center">Historial de Registros</h2>
-                <div id="history-list" class="space-y-4"></div>
-                <button onclick="hideHistory()" 
-                        class="mt-6 w-full bg-gray-600 hover:bg-gray-500 py-4 rounded-2xl text-lg">
-                        Cerrar
-                </button>
-            </div>
+        <!-- Pantalla Admin -->
+        <div id="admin-screen" class="hidden">
+            <h2 class="text-2xl font-bold text-center mb-6">👑 Panel de Administrador</h2>
+            <div id="users-list" class="space-y-4 max-h-[70vh] overflow-auto"></div>
+            <button onclick="logout()" class="mt-6 w-full bg-red-500 hover:bg-red-600 py-4 rounded-2xl">Cerrar Sesión</button>
+        </div>
+    </div>
+
+    <!-- Modal Historial -->
+    <div id="history-modal" class="hidden fixed inset-0 bg-black/90 flex items-center justify-center z-50">
+        <div class="bg-gray-800 p-6 rounded-3xl max-w-md w-full max-h-[85vh] overflow-auto">
+            <h2 class="text-2xl font-bold mb-4">Historial</h2>
+            <div id="history-list" class="space-y-4"></div>
+            <button onclick="hideHistory()" class="mt-6 w-full bg-gray-600 py-4 rounded-2xl">Cerrar</button>
         </div>
     </div>
 
@@ -79,73 +74,74 @@
         let currentEntryId = null;
         let timerInterval = null;
         let startTime = null;
+        let isAdmin = false;
 
         function updateClock() {
             const now = new Date();
-            document.getElementById('current-date').textContent = 
-                now.toLocaleDateString('es-BO', { 
-                    weekday: 'long', 
-                    year: 'numeric', 
-                    month: 'long', 
-                    day: 'numeric' 
-                });
+            document.getElementById('current-date').textContent = now.toLocaleDateString('es-BO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         }
 
         function getLocation(callback) {
             if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    position => callback(position.coords.latitude, position.coords.longitude),
-                    error => {
-                        console.error('Error de geolocalización:', error);
-                        alert('⚠️ Permite el acceso a tu ubicación para registrar el lugar de trabajo.');
-                        callback(null, null);
-                    },
-                    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-                );
-            } else {
-                alert('Tu navegador no soporta geolocalización.');
-                callback(null, null);
+                navigator.geolocation.getCurrentPosition(pos => callback(pos.coords.latitude, pos.coords.longitude), 
+                    () => callback(null, null), { enableHighAccuracy: true });
+            } else callback(null, null);
+        }
+
+        async function handleLogin() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+
+            if (username === 'diegoadmin' && password === 'admin') {
+                isAdmin = true;
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('admin-screen').classList.remove('hidden');
+                loadAllUsers();
+            } else if (username) {
+                // Login normal
+                getLocation(async (lat, lon) => {
+                    const res = await fetch('/register', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name: username, latitude: lat, longitude: lon})
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        currentUserId = data.user_id;
+                        isAdmin = false;
+                        document.getElementById('login-screen').classList.add('hidden');
+                        document.getElementById('user-screen').classList.remove('hidden');
+                        loadStats();
+                    }
+                });
             }
         }
 
-        async function registerUser() {
-            const name = document.getElementById('name').value.trim();
-            if (!name) return alert('Por favor ingresa tu nombre');
-
-            getLocation(async (lat, lon) => {
-                const res = await fetch('/register', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, latitude: lat, longitude: lon })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    currentUserId = data.user_id;
-                    document.getElementById('login').classList.add('hidden');
-                    document.getElementById('main').classList.remove('hidden');
-                    loadStats();
-                }
-            });
+        async function loadAllUsers() {
+            const res = await fetch('/all-users');
+            const users = await res.json();
+            const list = document.getElementById('users-list');
+            list.innerHTML = users.map(u => `
+                <div class="bg-gray-700 p-4 rounded-2xl">
+                    <div class="font-bold">${u.name}</div>
+                    <div class="text-green-400">${(u.total_minutes / 60).toFixed(2)} horas totales</div>
+                    <div class="text-xs text-gray-400">Último: ${u.last_entry ? new Date(u.last_entry).toLocaleDateString('es-BO') : 'Sin registros'}</div>
+                </div>
+            `).join('');
         }
 
-        async function startTimer() {
+        async function startTimer() { /* ... mismo código anterior ... */ 
+            // (Mantengo el código anterior de startTimer, stopTimer, etc.)
             if (!currentUserId) return;
-
             getLocation(async (lat, lon) => {
-                const res = await fetch('/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: currentUserId, latitude: lat, longitude: lon })
-                });
+                const res = await fetch('/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({user_id: currentUserId, latitude: lat, longitude: lon}) });
                 const data = await res.json();
                 if (data.success) {
                     currentEntryId = data.entry_id;
                     startTime = Date.now();
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
-                    document.getElementById('status').textContent = '⏳ Trabajando...';
-                    document.getElementById('status').classList.add('text-green-400');
-
+                    document.getElementById('status').textContent = 'Trabajando...';
                     if (timerInterval) clearInterval(timerInterval);
                     timerInterval = setInterval(updateTimer, 1000);
                 }
@@ -165,8 +161,8 @@
             if (!currentEntryId) return;
             const res = await fetch('/stop', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ entry_id: currentEntryId })
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({entry_id: currentEntryId})
             });
             const data = await res.json();
             if (data.success) {
@@ -174,7 +170,7 @@
                 document.getElementById('timer').textContent = '00:00:00';
                 document.getElementById('startBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
-                document.getElementById('status').textContent = `✅ Completado: ${Math.floor(data.duration_minutes / 60)}h ${data.duration_minutes % 60}m`;
+                document.getElementById('status').textContent = `Completado: ${Math.floor(data.duration_minutes / 60)}h ${data.duration_minutes % 60}m`;
                 currentEntryId = null;
                 startTime = null;
                 loadStats();
@@ -183,39 +179,23 @@
 
         async function loadStats() {
             if (!currentUserId) return;
-            
-            const dailyRes = await fetch(`/daily/${currentUserId}`);
-            const dailyData = await dailyRes.json();
-            document.getElementById('daily').textContent = parseFloat(dailyData.daily_hours).toFixed(2) + ' h';
-
-            const weeklyRes = await fetch(`/weekly/${currentUserId}`);
-            const weeklyData = await weeklyRes.json();
-            document.getElementById('weekly').textContent = parseFloat(weeklyData.weekly_hours).toFixed(2) + ' h';
+            const d = await fetch(`/daily/${currentUserId}`); 
+            document.getElementById('daily').textContent = (await d.json()).daily_hours + ' h';
+            const w = await fetch(`/weekly/${currentUserId}`); 
+            document.getElementById('weekly').textContent = (await w.json()).weekly_hours + ' h';
         }
 
         async function showHistory() {
             if (!currentUserId) return;
             const res = await fetch(`/history/${currentUserId}`);
             const entries = await res.json();
-            
-            const list = document.getElementById('history-list');
-            list.innerHTML = entries.map(e => `
-                <div class="bg-gray-700 p-5 rounded-2xl">
-                    <div class="font-medium">${new Date(e.start_time).toLocaleString('es-BO')}</div>
-                    <div class="text-green-400 mt-1">
-                        ${e.duration_minutes ? 
-                            `${Math.floor(e.duration_minutes/60)}h ${e.duration_minutes % 60}m` : 
-                            'En progreso'}
-                    </div>
-                    ${e.latitude && e.longitude ? 
-                        `<a href="https://www.google.com/maps?q=${e.latitude},${e.longitude}" 
-                           target="_blank" class="text-blue-400 underline text-sm mt-2 inline-block">
-                           📍 Ver ubicación en Google Maps
-                        </a>` : 
-                        '<span class="text-gray-500 text-sm">Ubicación no registrada</span>'}
+            document.getElementById('history-list').innerHTML = entries.map(e => `
+                <div class="bg-gray-700 p-4 rounded-2xl">
+                    <div>${new Date(e.start_time).toLocaleString('es-BO')}</div>
+                    <div class="text-green-400">${e.duration_minutes ? Math.floor(e.duration_minutes/60)+'h '+(e.duration_minutes%60)+'m' : 'En progreso'}</div>
+                    ${e.latitude && e.longitude ? `<a href="https://www.google.com/maps?q=${e.latitude},${e.longitude}" target="_blank" class="text-blue-400">📍 Ver en Maps</a>` : ''}
                 </div>
             `).join('');
-            
             document.getElementById('history-modal').classList.remove('hidden');
         }
 
@@ -223,14 +203,14 @@
             document.getElementById('history-modal').classList.add('hidden');
         }
 
-        // Inicialización
+        function logout() {
+            location.reload();
+        }
+
+        // Init
         updateClock();
         setInterval(updateClock, 60000);
-
-        // Registrar Service Worker para PWA
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(console.error);
-        }
+        if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
     </script>
 </body>
 </html>
