@@ -144,6 +144,32 @@ app.get('/history/:user_id', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// === ADMIN ROUTES ===
+app.post('/login-admin', async (req, res) => {
+  const { username, password } = req.body;
+  if (username === 'diegoadmin' && password === 'admin') {
+    res.json({ success: true, isAdmin: true });
+  } else {
+    res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+  }
+});
+
+app.get('/all-users', async (req, res) => {
+  try {
+    const users = await pool.query(`
+      SELECT u.id, u.name, 
+             COALESCE(SUM(te.duration_minutes), 0) as total_minutes,
+             MAX(te.start_time) as last_entry
+      FROM users u
+      LEFT JOIN time_entries te ON u.id = te.user_id
+      GROUP BY u.id, u.name
+      ORDER BY u.name
+    `);
+    res.json(users.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);
