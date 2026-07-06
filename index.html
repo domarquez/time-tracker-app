@@ -3,65 +3,81 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Control de Horas</title>
+    <title>Control de Horas - Diego Tracker</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: system-ui, sans-serif; }
-        .clock { font-size: 4rem; font-weight: bold; }
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+        body { font-family: 'Roboto', sans-serif; }
+        .clock { font-size: 4.5rem; font-weight: bold; letter-spacing: 2px; }
     </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
     <div class="max-w-md w-full bg-gray-800 p-8 rounded-3xl shadow-2xl">
-
         <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
-
-        <!-- Login Simple -->
-        <div id="login-screen">
-            <div class="space-y-5">
-                <input id="phone" type="tel" placeholder="Número de Teléfono" 
-                       class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
-                <input id="name" type="text" placeholder="Nombre Completo (opcional)" 
-                       class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
-                
-                <button onclick="loginUser()" 
-                        class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">
-                        ENTRAR
-                </button>
-
-                <button onclick="loginAsAdmin()" 
-                        class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">
-                        👑 Entrar como Administrador
-                </button>
-            </div>
+        
+        <!-- Pantalla de Login -->
+        <div id="login" class="space-y-4">
+            <input id="name" type="text" placeholder="Tu Nombre Completo" 
+                   class="w-full p-4 bg-gray-700 rounded-2xl text-xl focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button onclick="registerUser()" 
+                    class="w-full bg-blue-600 hover:bg-blue-700 py-4 rounded-2xl text-xl font-semibold transition">
+                    Registrarse / Ingresar
+            </button>
         </div>
 
-        <!-- User Screen -->
-        <div id="user-screen" class="hidden space-y-6">
+        <!-- Pantalla Principal -->
+        <div id="main" class="hidden space-y-6">
             <div class="text-center">
-                <div id="greeting" class="text-2xl font-bold mb-2"></div>
-                <div id="status" class="text-green-400 text-2xl">Listo</div>
-                <div id="timer" class="clock text-blue-400 mt-4">00:00:00</div>
+                <div id="status" class="text-green-400 text-2xl font-semibold mb-2">Listo para empezar</div>
+                <div id="timer" class="clock text-blue-400">00:00:00</div>
+                <div id="current-date" class="text-gray-400 mt-2 text-lg"></div>
             </div>
 
             <div class="flex gap-4">
-                <button onclick="startTimer()" id="startBtn" class="flex-1 bg-green-600 py-6 rounded-3xl text-2xl font-bold">EMPEZAR</button>
-                <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 py-6 rounded-3xl text-2xl font-bold">DETENER</button>
+                <button onclick="startTimer()" id="startBtn"
+                        class="flex-1 bg-green-600 hover:bg-green-700 py-6 rounded-3xl text-2xl font-bold transition">
+                    EMPEZAR
+                </button>
+                <button onclick="stopTimer()" id="stopBtn" disabled
+                        class="flex-1 bg-red-600 hover:bg-red-700 py-6 rounded-3xl text-2xl font-bold transition">
+                    DETENER
+                </button>
             </div>
 
-            <div class="grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
-                <div><div class="text-gray-400">HOY</div><div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div></div>
-                <div><div class="text-gray-400">SEMANA</div><div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div></div>
+            <div class="grid grid-cols-2 gap-4 text-center bg-gray-700 p-6 rounded-3xl">
+                <div>
+                    <div class="text-sm text-gray-400">HOY</div>
+                    <div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div>
+                </div>
+                <div>
+                    <div class="text-sm text-gray-400">SEMANA</div>
+                    <div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div>
+                </div>
             </div>
 
-            <button onclick="showHistory()" class="w-full bg-gray-600 py-4 rounded-2xl">Ver Historial</button>
-            <button onclick="logout()" class="w-full bg-red-500 py-3 rounded-2xl">Cerrar Sesión</button>
+            <button onclick="showHistory()" 
+                    class="w-full bg-gray-600 hover:bg-gray-500 py-4 rounded-2xl text-lg font-medium">
+                    📋 Ver Historial
+            </button>
         </div>
 
-        <!-- Admin Screen -->
-        <div id="admin-screen" class="hidden">
-            <h2 class="text-2xl font-bold text-center mb-6">👑 Panel Administrador</h2>
-            <div id="users-list" class="space-y-4"></div>
-            <button onclick="logout()" class="mt-8 w-full bg-red-500 py-4 rounded-2xl">Cerrar Sesión</button>
+        <!-- Modal Historial -->
+        <div id="history-modal" class="hidden fixed inset-0 bg-black/90 flex items-center justify-center z-50">
+            <div class="bg-gray-800 p-6 rounded-3xl max-w-md w-full max-h-[85vh] overflow-auto">
+                <h2 class="text-2xl font-bold mb-4 text-center">Historial de Registros</h2>
+                <div id="history-list" class="space-y-4"></div>
+                <button onclick="hideHistory()" 
+                        class="mt-6 w-full bg-gray-600 hover:bg-gray-500 py-4 rounded-2xl text-lg">
+                        Cerrar
+                </button>
+            </div>
         </div>
     </div>
 
@@ -71,113 +87,159 @@
         let timerInterval = null;
         let startTime = null;
 
-        async function loginUser() {
-            const phone = document.getElementById('phone').value.trim();
-            const name = document.getElementById('name').value.trim() || phone;
-            if (!phone) return alert("Ingresa tu número de teléfono");
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('current-date').textContent = 
+                now.toLocaleDateString('es-BO', { 
+                    weekday: 'long', 
+                    year: 'numeric', 
+                    month: 'long', 
+                    day: 'numeric' 
+                });
+        }
 
-            const res = await fetch('/register', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: name})
+        function getLocation(callback) {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    position => callback(position.coords.latitude, position.coords.longitude),
+                    error => {
+                        console.error('Error de geolocalización:', error);
+                        alert('⚠️ Permite el acceso a tu ubicación para registrar el lugar de trabajo.');
+                        callback(null, null);
+                    },
+                    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+                );
+            } else {
+                alert('Tu navegador no soporta geolocalización.');
+                callback(null, null);
+            }
+        }
+
+        async function registerUser() {
+            const name = document.getElementById('name').value.trim();
+            if (!name) return alert('Por favor ingresa tu nombre');
+
+            getLocation(async (lat, lon) => {
+                const res = await fetch('/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, latitude: lat, longitude: lon })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentUserId = data.user_id;
+                    document.getElementById('login').classList.add('hidden');
+                    document.getElementById('main').classList.remove('hidden');
+                    loadStats();
+                }
             });
-            const data = await res.json();
-            if (data.success) {
-                currentUserId = data.user_id;
-                localStorage.setItem('currentUserId', currentUserId);
-                localStorage.setItem('currentUserName', name);
-                showUserScreen(name);
-            }
         }
 
-        function loginAsAdmin() {
-            if (prompt("Contraseña Admin:") === "admin") {
-                document.getElementById('login-screen').classList.add('hidden');
-                document.getElementById('admin-screen').classList.remove('hidden');
-                loadAllUsers();
-            } else alert("Contraseña incorrecta");
-        }
-
-        function showUserScreen(name) {
-            document.getElementById('login-screen').classList.add('hidden');
-            document.getElementById('user-screen').classList.remove('hidden');
-            document.getElementById('greeting').textContent = name;
-            loadStats();
-        }
-
-        async function loadAllUsers() {
-            const res = await fetch('/all-users');
-            const users = await res.json();
-            document.getElementById('users-list').innerHTML = users.map(u => `
-                <div class="bg-gray-700 p-5 rounded-2xl">
-                    <div class="font-bold">${u.name}</div>
-                    <div class="text-green-400">${(u.total_minutes/60).toFixed(2)} horas</div>
-                </div>
-            `).join('');
-        }
-
-        // === Funciones básicas (start, stop, etc.) ===
         async function startTimer() {
-            const res = await fetch('/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({user_id: currentUserId})});
-            const data = await res.json();
-            if (data.success) {
-                currentEntryId = data.entry_id;
-                startTime = Date.now();
-                document.getElementById('startBtn').disabled = true;
-                document.getElementById('stopBtn').disabled = false;
-                timerInterval = setInterval(updateTimer, 1000);
-            }
+            if (!currentUserId) return;
+
+            getLocation(async (lat, lon) => {
+                const res = await fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: currentUserId, latitude: lat, longitude: lon })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    currentEntryId = data.entry_id;
+                    startTime = Date.now();
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('status').textContent = '⏳ Trabajando...';
+                    document.getElementById('status').classList.add('text-green-400');
+
+                    if (timerInterval) clearInterval(timerInterval);
+                    timerInterval = setInterval(updateTimer, 1000);
+                }
+            });
         }
 
         function updateTimer() {
-            const elapsed = Math.floor((Date.now() - startTime)/1000);
-            const h = Math.floor(elapsed/3600).toString().padStart(2,'0');
-            const m = Math.floor((elapsed%3600)/60).toString().padStart(2,'0');
-            const s = (elapsed%60).toString().padStart(2,'0');
+            if (!startTime) return;
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+            const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+            const s = (elapsed % 60).toString().padStart(2, '0');
             document.getElementById('timer').textContent = `${h}:${m}:${s}`;
         }
 
         async function stopTimer() {
-            const res = await fetch('/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entry_id: currentEntryId})});
+            if (!currentEntryId) return;
+            const res = await fetch('/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry_id: currentEntryId })
+            });
             const data = await res.json();
             if (data.success) {
                 clearInterval(timerInterval);
                 document.getElementById('timer').textContent = '00:00:00';
                 document.getElementById('startBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
+                document.getElementById('status').textContent = `✅ Completado: ${Math.floor(data.duration_minutes / 60)}h ${data.duration_minutes % 60}m`;
+                currentEntryId = null;
+                startTime = null;
                 loadStats();
             }
         }
 
         async function loadStats() {
-            const d = await fetch(`/daily/${currentUserId}`);
-            document.getElementById('daily').textContent = (await d.json()).daily_hours + ' h';
-            const w = await fetch(`/weekly/${currentUserId}`);
-            document.getElementById('weekly').textContent = (await w.json()).weekly_hours + ' h';
+            if (!currentUserId) return;
+            
+            const dailyRes = await fetch(`/daily/${currentUserId}`);
+            const dailyData = await dailyRes.json();
+            document.getElementById('daily').textContent = parseFloat(dailyData.daily_hours).toFixed(2) + ' h';
+
+            const weeklyRes = await fetch(`/weekly/${currentUserId}`);
+            const weeklyData = await weeklyRes.json();
+            document.getElementById('weekly').textContent = parseFloat(weeklyData.weekly_hours).toFixed(2) + ' h';
         }
 
         async function showHistory() {
+            if (!currentUserId) return;
             const res = await fetch(`/history/${currentUserId}`);
             const entries = await res.json();
-            // Simple history for now
-            alert("Historial cargado (mira consola para detalle)");
-            console.log(entries);
+            
+            const list = document.getElementById('history-list');
+            list.innerHTML = entries.map(e => `
+                <div class="bg-gray-700 p-5 rounded-2xl">
+                    <div class="font-medium">${new Date(e.start_time).toLocaleString('es-BO')}</div>
+                    <div class="text-green-400 mt-1">
+                        ${e.duration_minutes ? 
+                            `${Math.floor(e.duration_minutes/60)}h ${e.duration_minutes % 60}m` : 
+                            'En progreso'}
+                    </div>
+                    ${e.latitude && e.longitude ? 
+                        `<a href="https://www.google.com/maps?q=${e.latitude},${e.longitude}" 
+                           target="_blank" class="text-blue-400 underline text-sm mt-2 inline-block">
+                           📍 Ver ubicación en Google Maps
+                        </a>` : 
+                        '<span class="text-gray-500 text-sm">Ubicación no registrada</span>'}
+                </div>
+            `).join('');
+            
+            document.getElementById('history-modal').classList.remove('hidden');
         }
 
-        function logout() {
-            localStorage.clear();
-            location.reload();
+        function hideHistory() {
+            document.getElementById('history-modal').classList.add('hidden');
         }
 
-        // Auto load
-        window.onload = () => {
-            const savedId = localStorage.getItem('currentUserId');
-            const savedName = localStorage.getItem('currentUserName');
-            if (savedId) {
-                currentUserId = parseInt(savedId);
-                showUserScreen(savedName || "Usuario");
-            }
-        };
+        // Inicialización
+        updateClock();
+        setInterval(updateClock, 60000);
+
+        // Registrar Service Worker para PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+                .then(reg => console.log('Service Worker registrado'))
+                .catch(err => console.error('Error Service Worker:', err));
+        }
     </script>
 </body>
 </html>
