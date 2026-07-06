@@ -24,7 +24,7 @@
             
             <button onclick="loginUser()" class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
             
-            <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
+            <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg">👑 Administrador</button>
 
             <button onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-4 rounded-3xl text-sm hidden">
                 📲 Instalar App en Celular
@@ -68,7 +68,7 @@
         let startTime = null;
         let deferredPrompt;
 
-        // PWA Install
+        // PWA Install Button
         window.addEventListener('beforeinstallprompt', (e) => {
             deferredPrompt = e;
             document.getElementById('installBtn').classList.remove('hidden');
@@ -81,6 +81,13 @@
                 deferredPrompt = null;
                 document.getElementById('installBtn').classList.add('hidden');
             }
+        }
+
+        // Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js')
+                .then(() => console.log('PWA Service Worker OK'))
+                .catch(err => console.log('SW Error:', err));
         }
 
         async function loginUser() {
@@ -103,13 +110,11 @@
         }
 
         function loginAsAdmin() {
-            if (prompt("🔑 Contraseña de Administrador:") === "admin") {
+            if (prompt("🔑 Contraseña Admin:") === "admin") {
                 document.getElementById('login-screen').classList.add('hidden');
                 document.getElementById('admin-screen').classList.remove('hidden');
                 loadAllUsers();
-            } else {
-                alert("Contraseña incorrecta");
-            }
+            } else alert("Contraseña incorrecta");
         }
 
         function showUserScreen(name) {
