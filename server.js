@@ -33,6 +33,26 @@ function formatHours(minutes) {
   return { minutes: m, hours, label: `${hours} horas` };
 }
 
+/** Close duplicate open entries before unique index (keep newest per user). */
+async function closeDuplicateOpenEntries() {
+  await pool.query(`
+    WITH ranked AS (
+      SELECT id, user_id, start_time,
+             ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_time DESC, id DESC) AS rn
+      FROM time_entries
+      WHERE end_time IS NULL
+    ),
+    to_close AS (
+      SELECT id, start_time FROM ranked WHERE rn > 1
+    )
+    UPDATE time_entries te
+    SET end_time = te.start_time,
+        duration_minutes = 0
+    FROM to_close c
+    WHERE te.id = c.id
+  `);
+}
+
 // Inicializar tablas (migración segura)
 async function initDB() {
   await pool.query(`
@@ -75,13 +95,18 @@ async function initDB() {
     CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users (phone) WHERE phone IS NOT NULL;
   `);
 
-  // Partial unique: at most one open entry per user
+  // Clean legacy duplicate open shifts, then enforce one open entry per user
+  await closeDuplicateOpenEntries();
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS time_entries_one_open_per_user
     ON time_entries (user_id) WHERE end_time IS NULL;
   `);
+
+  console.log('Base de datos lista');
 }
-initDB().catch(console.error);
+initDB().catch((err) => {
+  console.error('Error initDB:', err);
+});
 
 /** Monday (YYYY-MM-DD) of current week in America/La_Paz */
 async function getWeekStartLaPaz(dateInput) {
@@ -357,7 +382,7 @@ app.get('/weekly/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const weekStart = await getWeekStartLaPaz();
-    // Lunes–Sábado: recalcular desde time_entries por zona La Paz (más fiable que weekly_summaries solo)
+    // Lunes–Sábado: recalcular desde time_entries por zona La Paz
     const result = await pool.query(
       `SELECT COALESCE(SUM(duration_minutes), 0) AS total
        FROM time_entries
