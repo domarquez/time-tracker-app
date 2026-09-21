@@ -27,10 +27,55 @@ function normalizePhone(raw) {
   return hasPlus ? `+${digits}` : digits;
 }
 
+/**
+ * Redondeo a medias horas / horas completas.
+ * Por cada hora entera de minutos transcurridos, el resto (0–59):
+ * - rem > 50 → +60 min (hora completa)
+ * - rem > 20 → +30 min (media hora)
+ * - rem ≤ 20 → +0
+ */
+function roundToHalfOrFullHour(totalMinutes) {
+  const m = Math.max(0, Math.floor(Number(totalMinutes) || 0));
+  const whole = Math.floor(m / 60);
+  const rem = m % 60;
+  let add = 0;
+  if (rem > 50) add = 60;
+  else if (rem > 20) add = 30;
+  return whole * 60 + add;
+}
+
+/** Detalle del redondeo (para mensajes / API). */
+function roundingDetail(totalMinutes) {
+  const raw = Math.max(0, Math.floor(Number(totalMinutes) || 0));
+  const whole = Math.floor(raw / 60);
+  const rem = raw % 60;
+  let add = 0;
+  if (rem > 50) add = 60;
+  else if (rem > 20) add = 30;
+  return { raw, rem, add, rounded: whole * 60 + add };
+}
+
 function formatHours(minutes) {
   const m = Math.max(0, Number(minutes) || 0);
-  const hours = (m / 60).toFixed(2);
+  const hoursNum = m / 60;
+  // Preferir decimales .0 / .5 cuando aplica; si no, 2 decimales
+  const isHalfStep = Math.abs(hoursNum * 2 - Math.round(hoursNum * 2)) < 1e-9;
+  const hours = isHalfStep ? hoursNum.toFixed(1) : hoursNum.toFixed(2);
   return { minutes: m, hours, label: `${hours} horas` };
+}
+
+function buildStopMessage(detail) {
+  const fmt = formatHours(detail.rounded);
+  if (detail.add === 60) {
+    return `Estuviste ${fmt.label} (redondeo: +${detail.rem} min → hora completa)`;
+  }
+  if (detail.add === 30) {
+    return `Estuviste ${fmt.label} (redondeo: +${detail.rem} min → media hora)`;
+  }
+  if (detail.rem > 0) {
+    return `Estuviste ${fmt.label} (fracción de ${detail.rem} min no acredita; ≤20 min)`;
+  }
+  return `Estuviste ${fmt.label}`;
 }
 
 /** Close duplicate open entries before unique index (keep newest per user). */
@@ -283,8 +328,9 @@ app.post('/stop', async (req, res) => {
     const row = entry.rows[0];
     const endTime = new Date();
     const startTime = new Date(row.start_time);
-    let minutes = Math.floor((endTime - startTime) / (1000 * 60));
-    minutes = Math.floor(minutes / 15) * 15; // Redondeo hacia abajo cada 15 min
+    const rawMinutes = Math.floor((endTime - startTime) / (1000 * 60));
+    const detail = roundingDetail(rawMinutes);
+    const minutes = detail.rounded;
 
     await pool.query(
       'UPDATE time_entries SET end_time = NOW(), duration_minutes = $1 WHERE id = $2',
@@ -297,9 +343,10 @@ app.post('/stop', async (req, res) => {
     const fmt = formatHours(minutes);
     res.json({
       success: true,
+      raw_minutes: detail.raw,
       duration_minutes: minutes,
       duration_hours: fmt.hours,
-      message: `Estuviste ${fmt.label}`,
+      message: buildStopMessage(detail),
       entry_id: row.id
     });
   } catch (e) {

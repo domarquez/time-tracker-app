@@ -43,6 +43,8 @@
                 <div id="phone-label" class="text-gray-400 text-sm mt-1"></div>
                 <div id="status" class="text-green-400 text-xl mt-4">Listo para trabajar</div>
                 <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
+                <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
+                <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
             </div>
 
             <div class="flex gap-4">
@@ -53,12 +55,12 @@
             <div class="grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
                 <div>
                     <div class="text-gray-400 text-sm">HOY</div>
-                    <div id="daily" class="text-2xl font-bold text-yellow-400">0.00 h</div>
+                    <div id="daily" class="text-2xl font-bold text-yellow-400">0.0 h</div>
                     <div id="daily-label" class="text-xs text-gray-400 mt-1"></div>
                 </div>
                 <div>
                     <div class="text-gray-400 text-sm">SEMANA</div>
-                    <div id="weekly" class="text-2xl font-bold text-purple-400">0.00 h</div>
+                    <div id="weekly" class="text-2xl font-bold text-purple-400">0.0 h</div>
                     <div id="weekly-label" class="text-xs text-gray-400 mt-1"></div>
                 </div>
             </div>
@@ -89,8 +91,31 @@
         let deferredPrompt;
         let lastStartReminderDate = null;
         let lastStopReminderDate = null;
+        /** Por tramo de hora del turno: { half: bool, full: bool } */
+        let fractionNotified = {};
 
         const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+
+        /**
+         * ≤20 → pierden (solo horas enteras);
+         * >20 y ≤50 → +0.5 h;
+         * >50 → +1.0 h.
+         */
+        function roundToHalfOrFullHour(totalMinutes) {
+            const m = Math.max(0, Math.floor(Number(totalMinutes) || 0));
+            const whole = Math.floor(m / 60);
+            const rem = m % 60;
+            let add = 0;
+            if (rem > 50) add = 60;
+            else if (rem > 20) add = 30;
+            return whole * 60 + add;
+        }
+
+        function formatDecimalHours(minutes) {
+            const h = (Math.max(0, Number(minutes) || 0) / 60);
+            const isHalfStep = Math.abs(h * 2 - Math.round(h * 2)) < 1e-9;
+            return isHalfStep ? h.toFixed(1) : h.toFixed(2);
+        }
 
         window.addEventListener('beforeinstallprompt', (e) => {
             deferredPrompt = e;
@@ -110,7 +135,7 @@
             navigator.serviceWorker.register('/sw.js').catch(console.error);
         }
 
-        function showBanner(msg, ms = 6000) {
+        function showBanner(msg, ms = 8000) {
             const el = document.getElementById('banner');
             el.textContent = msg;
             el.classList.remove('hidden');
@@ -196,6 +221,7 @@
                     document.getElementById('stopBtn').disabled = false;
                     document.getElementById('status').textContent = 'Turno en curso';
                     document.getElementById('status').className = 'text-yellow-400 text-xl mt-4';
+                    seedFractionNotifiedFromElapsed();
                     clearInterval(timerInterval);
                     timerInterval = setInterval(updateTimer, 1000);
                     updateTimer();
@@ -213,11 +239,28 @@
             timerInterval = null;
             currentEntryId = null;
             serverStartTime = null;
+            fractionNotified = {};
             document.getElementById('timer').textContent = '00:00:00';
+            const credit = document.getElementById('credit-line');
+            credit.classList.add('hidden');
+            credit.textContent = 'Acreditaría: 0.0 h';
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
             document.getElementById('status').textContent = 'Listo para trabajar';
             document.getElementById('status').className = 'text-green-400 text-xl mt-4';
+        }
+
+        /** Evita reenviar avisos ya cruzados al restaurar un turno. */
+        function seedFractionNotifiedFromElapsed() {
+            fractionNotified = {};
+            if (!serverStartTime) return;
+            const elapsedMin = Math.floor(Math.max(0, Date.now() - serverStartTime.getTime()) / 60000);
+            const whole = Math.floor(elapsedMin / 60);
+            const rem = elapsedMin % 60;
+            for (let s = 0; s < whole; s++) {
+                fractionNotified[s] = { half: true, full: true };
+            }
+            fractionNotified[whole] = { half: rem > 20, full: rem > 50 };
         }
 
         async function loadAllUsers() {
@@ -227,7 +270,7 @@
                 <div class="bg-gray-700 p-5 rounded-2xl">
                     <div class="font-bold">${escapeHtml(u.name)}</div>
                     <div class="text-gray-400 text-sm">${u.phone ? escapeHtml(u.phone) : 'Sin teléfono'}</div>
-                    <div class="text-green-400">${(u.total_minutes / 60).toFixed(2)} horas</div>
+                    <div class="text-green-400">${formatDecimalHours(u.total_minutes)} horas</div>
                 </div>
             `).join('');
         }
@@ -249,9 +292,11 @@
             if (res.status === 409 && data.entry_id) {
                 currentEntryId = data.entry_id;
                 serverStartTime = new Date(data.start_time);
+                seedFractionNotifiedFromElapsed();
             } else if (data.success) {
                 currentEntryId = data.entry_id;
                 serverStartTime = new Date(data.start_time);
+                fractionNotified = {};
             } else {
                 return alert(data.error || 'No se pudo prender');
             }
@@ -267,12 +312,47 @@
 
         function updateTimer() {
             if (!serverStartTime) return;
-            const elapsed = Math.floor((Date.now() - serverStartTime.getTime()) / 1000);
-            const safe = Math.max(0, elapsed);
+            const elapsedSec = Math.floor((Date.now() - serverStartTime.getTime()) / 1000);
+            const safe = Math.max(0, elapsedSec);
             const h = Math.floor(safe / 3600).toString().padStart(2, '0');
             const m = Math.floor((safe % 3600) / 60).toString().padStart(2, '0');
             const s = (safe % 60).toString().padStart(2, '0');
             document.getElementById('timer').textContent = `${h}:${m}:${s}`;
+
+            const elapsedMin = Math.floor(safe / 60);
+            const credited = roundToHalfOrFullHour(elapsedMin);
+            const creditEl = document.getElementById('credit-line');
+            creditEl.textContent = `Acreditaría: ${formatDecimalHours(credited)} h`;
+            creditEl.classList.remove('hidden');
+
+            checkFractionAlerts(elapsedMin);
+        }
+
+        async function checkFractionAlerts(elapsedMin) {
+            if (!currentEntryId) return;
+            const segment = Math.floor(elapsedMin / 60);
+            const rem = elapsedMin % 60;
+            if (!fractionNotified[segment]) {
+                fractionNotified[segment] = { half: false, full: false };
+            }
+            const flags = fractionNotified[segment];
+
+            if (rem > 50 && !flags.full) {
+                flags.full = true;
+                flags.half = true;
+                await showLocalNotification(
+                    '✅ Hora completa en este tramo',
+                    'Ya suma hora completa en este tramo',
+                    `fraction-full-${segment}`
+                );
+            } else if (rem > 20 && !flags.half) {
+                flags.half = true;
+                await showLocalNotification(
+                    '⏱ Media hora en este tramo',
+                    'Ya suma media hora en este tramo',
+                    `fraction-half-${segment}`
+                );
+            }
         }
 
         async function stopTimer() {
@@ -283,9 +363,13 @@
             });
             const data = await res.json();
             if (data.success) {
-                const msg = data.message || `Estuviste ${data.duration_hours} horas`;
-                showBanner(msg);
-                alert(msg);
+                const hoursLabel = data.duration_hours != null
+                    ? `${data.duration_hours} h`
+                    : `${formatDecimalHours(data.duration_minutes)} h`;
+                const msg = data.message || `Estuviste ${hoursLabel}`;
+                const bannerMsg = `Acreditado: ${hoursLabel} — ${msg}`;
+                showBanner(bannerMsg, 10000);
+                alert(bannerMsg);
                 resetTimerUI();
                 await loadStats();
             } else {
@@ -304,9 +388,9 @@
                 const w = await wRes.json();
                 const days = await daysRes.json();
 
-                document.getElementById('daily').textContent = (d.daily_hours || '0.00') + ' h';
+                document.getElementById('daily').textContent = (d.daily_hours || '0.0') + ' h';
                 document.getElementById('daily-label').textContent = d.label || '';
-                document.getElementById('weekly').textContent = (w.weekly_hours || days.weekly_hours || '0.00') + ' h';
+                document.getElementById('weekly').textContent = (w.weekly_hours || days.weekly_hours || '0.0') + ' h';
                 document.getElementById('weekly-label').textContent = w.label || '';
 
                 const container = document.getElementById('week-days');
