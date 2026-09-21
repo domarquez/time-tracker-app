@@ -1,7 +1,7 @@
 {
   "name": "time-tracker-app",
-  "version": "1.0.0",
-  "description": "Control de Horas Laborales con Geolocalización",
+  "version": "1.1.0",
+  "description": "Control de Horas Laborales — login por teléfono, timer persistente (America/La_Paz)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

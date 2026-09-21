@@ -9,7 +9,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { font-family: system-ui, sans-serif; }
-        .clock { font-size: 4rem; font-weight: bold; }
+        .clock { font-size: 3.5rem; font-weight: bold; letter-spacing: 0.05em; }
     </style>
 </head>
 <body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
@@ -17,13 +17,18 @@
 
         <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
 
+        <!-- Banner confirmación -->
+        <div id="banner" class="hidden mb-4 p-4 rounded-2xl bg-emerald-700 text-center text-lg font-semibold"></div>
+
         <!-- LOGIN -->
         <div id="login-screen" class="space-y-5">
-            <input id="phone" type="tel" placeholder="Número de Teléfono" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
-            <input id="name" type="text" placeholder="Nombre Completo (opcional)" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
-            
+            <p class="text-gray-400 text-sm text-center">Ingresá con tu número. La contraseña es el mismo teléfono.</p>
+            <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Número de teléfono" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
+            <input id="name" type="text" autocomplete="name" placeholder="Nombre completo (solo la 1ª vez)" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
+            <p id="login-hint" class="text-amber-400 text-sm hidden"></p>
+
             <button onclick="loginUser()" class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
-            
+
             <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
 
             <button onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-4 rounded-3xl text-sm hidden">
@@ -35,22 +40,35 @@
         <div id="user-screen" class="hidden space-y-6">
             <div class="text-center">
                 <div id="greeting" class="text-2xl font-bold text-blue-300"></div>
-                <div id="status" class="text-green-400 text-2xl mt-4">Listo para trabajar</div>
-                <div id="timer" class="clock text-blue-400 mt-8">00:00:00</div>
+                <div id="phone-label" class="text-gray-400 text-sm mt-1"></div>
+                <div id="status" class="text-green-400 text-xl mt-4">Listo para trabajar</div>
+                <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
             </div>
 
             <div class="flex gap-4">
-                <button onclick="startTimer()" id="startBtn" class="flex-1 bg-green-600 py-6 rounded-3xl text-2xl font-bold">EMPEZAR</button>
-                <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 py-6 rounded-3xl text-2xl font-bold">DETENER</button>
+                <button onclick="startTimer()" id="startBtn" class="flex-1 bg-green-600 hover:bg-green-700 py-6 rounded-3xl text-xl font-bold disabled:opacity-40">PRENDER</button>
+                <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 hover:bg-red-700 py-6 rounded-3xl text-xl font-bold disabled:opacity-40">APAGAR</button>
             </div>
 
             <div class="grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
-                <div><div class="text-gray-400">HOY</div><div id="daily" class="text-3xl font-bold text-yellow-400">0.00 h</div></div>
-                <div><div class="text-gray-400">SEMANA</div><div id="weekly" class="text-3xl font-bold text-purple-400">0.00 h</div></div>
+                <div>
+                    <div class="text-gray-400 text-sm">HOY</div>
+                    <div id="daily" class="text-2xl font-bold text-yellow-400">0.00 h</div>
+                    <div id="daily-label" class="text-xs text-gray-400 mt-1"></div>
+                </div>
+                <div>
+                    <div class="text-gray-400 text-sm">SEMANA</div>
+                    <div id="weekly" class="text-2xl font-bold text-purple-400">0.00 h</div>
+                    <div id="weekly-label" class="text-xs text-gray-400 mt-1"></div>
+                </div>
             </div>
 
-            <button onclick="showHistory()" class="w-full bg-gray-600 py-4 rounded-2xl">Ver Historial</button>
-            <button onclick="logout()" class="w-full bg-red-500 py-3 rounded-2xl">Cerrar Sesión</button>
+            <div class="bg-gray-700 p-5 rounded-3xl">
+                <div class="text-gray-300 font-semibold mb-3 text-center">Día a día (Lun–Sáb)</div>
+                <div id="week-days" class="space-y-2 text-sm"></div>
+            </div>
+
+            <button onclick="logout()" class="w-full bg-red-500 hover:bg-red-600 py-3 rounded-2xl">Cerrar Sesión</button>
         </div>
 
         <!-- ADMIN SCREEN -->
@@ -62,13 +80,18 @@
     </div>
 
     <script>
+        const TZ = 'America/La_Paz';
         let currentUserId = null;
         let currentEntryId = null;
         let timerInterval = null;
-        let startTime = null;
+        let serverStartTime = null; // Date from server
+        let reminderInterval = null;
         let deferredPrompt;
+        let lastStartReminderDate = null;
+        let lastStopReminderDate = null;
 
-        // PWA Install
+        const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+
         window.addEventListener('beforeinstallprompt', (e) => {
             deferredPrompt = e;
             document.getElementById('installBtn').classList.remove('hidden');
@@ -83,45 +106,118 @@
             }
         }
 
-        // Service Worker
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').catch(console.error);
         }
 
-        async function loginUser() {
-            const phone = document.getElementById('phone').value.trim();
-            const name = document.getElementById('name').value.trim() || phone;
-            if (!phone) return alert("Ingresa tu número de teléfono");
+        function showBanner(msg, ms = 6000) {
+            const el = document.getElementById('banner');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            clearTimeout(el._t);
+            el._t = setTimeout(() => el.classList.add('hidden'), ms);
+        }
 
-            const res = await fetch('/register', {
+        function normalizePhoneClient(raw) {
+            const trimmed = (raw || '').trim();
+            const hasPlus = trimmed.startsWith('+');
+            const digits = trimmed.replace(/\D/g, '');
+            if (!digits) return '';
+            return hasPlus ? '+' + digits : digits;
+        }
+
+        async function loginUser() {
+            const phone = normalizePhoneClient(document.getElementById('phone').value);
+            const name = document.getElementById('name').value.trim();
+            const hint = document.getElementById('login-hint');
+            hint.classList.add('hidden');
+
+            if (!phone) return alert('Ingresá tu número de teléfono');
+
+            const res = await fetch('/login', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name})
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone, name: name || undefined })
             });
             const data = await res.json();
-            if (data.success) {
-                currentUserId = data.user_id;
-                localStorage.setItem('currentUserId', currentUserId);
-                localStorage.setItem('currentUserName', name);
-                showUserScreen(name);
+
+            if (data.needs_name || (res.status === 400 && data.error && data.error.includes('Nombre'))) {
+                hint.textContent = 'Primera vez: escribí tu nombre completo.';
+                hint.classList.remove('hidden');
+                document.getElementById('name').focus();
+                return;
             }
+
+            if (!data.success) {
+                return alert(data.error || 'No se pudo entrar');
+            }
+
+            persistSession(data.user_id, data.name, data.phone || phone);
+            await enterUserScreen(data.name, data.phone || phone);
+        }
+
+        function persistSession(userId, name, phone) {
+            currentUserId = userId;
+            localStorage.setItem('currentUserId', String(userId));
+            localStorage.setItem('currentUserName', name || '');
+            localStorage.setItem('currentUserPhone', phone || '');
         }
 
         function loginAsAdmin() {
-            if (prompt("🔑 Contraseña de Administrador:") === "admin") {
+            if (prompt('🔑 Contraseña de Administrador:') === 'admin') {
                 document.getElementById('login-screen').classList.add('hidden');
                 document.getElementById('admin-screen').classList.remove('hidden');
                 loadAllUsers();
             } else {
-                alert("Contraseña incorrecta");
+                alert('Contraseña incorrecta');
             }
         }
 
-        function showUserScreen(name) {
+        async function enterUserScreen(name, phone) {
             document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('admin-screen').classList.add('hidden');
             document.getElementById('user-screen').classList.remove('hidden');
-            document.getElementById('greeting').textContent = name;
-            loadStats();
+            document.getElementById('greeting').textContent = name || 'Usuario';
+            document.getElementById('phone-label').textContent = phone ? `Tel: ${phone}` : '';
+            await restoreActiveEntry();
+            await loadStats();
+            requestNotificationPermission();
+            startReminderLoop();
+        }
+
+        async function restoreActiveEntry() {
+            try {
+                const res = await fetch(`/active/${currentUserId}`);
+                const data = await res.json();
+                if (data.active) {
+                    currentEntryId = data.active.entry_id;
+                    serverStartTime = new Date(data.active.start_time);
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('status').textContent = 'Turno en curso';
+                    document.getElementById('status').className = 'text-yellow-400 text-xl mt-4';
+                    clearInterval(timerInterval);
+                    timerInterval = setInterval(updateTimer, 1000);
+                    updateTimer();
+                } else {
+                    resetTimerUI();
+                }
+            } catch (e) {
+                console.error(e);
+                resetTimerUI();
+            }
+        }
+
+        function resetTimerUI() {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            currentEntryId = null;
+            serverStartTime = null;
+            document.getElementById('timer').textContent = '00:00:00';
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('status').textContent = 'Listo para trabajar';
+            document.getElementById('status').className = 'text-green-400 text-xl mt-4';
         }
 
         async function loadAllUsers() {
@@ -129,63 +225,200 @@
             const users = await res.json();
             document.getElementById('users-list').innerHTML = users.map(u => `
                 <div class="bg-gray-700 p-5 rounded-2xl">
-                    <div class="font-bold">${u.name}</div>
-                    <div class="text-green-400">${(u.total_minutes/60).toFixed(2)} horas</div>
+                    <div class="font-bold">${escapeHtml(u.name)}</div>
+                    <div class="text-gray-400 text-sm">${u.phone ? escapeHtml(u.phone) : 'Sin teléfono'}</div>
+                    <div class="text-green-400">${(u.total_minutes / 60).toFixed(2)} horas</div>
                 </div>
             `).join('');
         }
 
+        function escapeHtml(s) {
+            return String(s || '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[c]);
+        }
+
         async function startTimer() {
-            const res = await fetch('/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({user_id: currentUserId})});
+            const res = await fetch('/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: currentUserId })
+            });
             const data = await res.json();
-            if (data.success) {
+
+            if (res.status === 409 && data.entry_id) {
                 currentEntryId = data.entry_id;
-                startTime = Date.now();
-                document.getElementById('startBtn').disabled = true;
-                document.getElementById('stopBtn').disabled = false;
-                timerInterval = setInterval(updateTimer, 1000);
+                serverStartTime = new Date(data.start_time);
+            } else if (data.success) {
+                currentEntryId = data.entry_id;
+                serverStartTime = new Date(data.start_time);
+            } else {
+                return alert(data.error || 'No se pudo prender');
             }
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('status').textContent = 'Turno en curso';
+            document.getElementById('status').className = 'text-yellow-400 text-xl mt-4';
+            clearInterval(timerInterval);
+            timerInterval = setInterval(updateTimer, 1000);
+            updateTimer();
         }
 
         function updateTimer() {
-            const elapsed = Math.floor((Date.now() - startTime) / 1000);
-            const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
-            const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
-            const s = (elapsed % 60).toString().padStart(2, '0');
+            if (!serverStartTime) return;
+            const elapsed = Math.floor((Date.now() - serverStartTime.getTime()) / 1000);
+            const safe = Math.max(0, elapsed);
+            const h = Math.floor(safe / 3600).toString().padStart(2, '0');
+            const m = Math.floor((safe % 3600) / 60).toString().padStart(2, '0');
+            const s = (safe % 60).toString().padStart(2, '0');
             document.getElementById('timer').textContent = `${h}:${m}:${s}`;
         }
 
         async function stopTimer() {
-            const res = await fetch('/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({entry_id: currentEntryId})});
+            const res = await fetch('/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry_id: currentEntryId, user_id: currentUserId })
+            });
             const data = await res.json();
             if (data.success) {
-                clearInterval(timerInterval);
-                document.getElementById('timer').textContent = '00:00:00';
-                document.getElementById('startBtn').disabled = false;
-                document.getElementById('stopBtn').disabled = true;
-                loadStats();
+                const msg = data.message || `Estuviste ${data.duration_hours} horas`;
+                showBanner(msg);
+                alert(msg);
+                resetTimerUI();
+                await loadStats();
+            } else {
+                alert(data.error || 'No se pudo apagar');
             }
         }
 
         async function loadStats() {
-            const d = await fetch(`/daily/${currentUserId}`);
-            document.getElementById('daily').textContent = (await d.json()).daily_hours + ' h';
-            const w = await fetch(`/weekly/${currentUserId}`);
-            document.getElementById('weekly').textContent = (await w.json()).weekly_hours + ' h';
+            try {
+                const [dRes, wRes, daysRes] = await Promise.all([
+                    fetch(`/daily/${currentUserId}`),
+                    fetch(`/weekly/${currentUserId}`),
+                    fetch(`/week-days/${currentUserId}`)
+                ]);
+                const d = await dRes.json();
+                const w = await wRes.json();
+                const days = await daysRes.json();
+
+                document.getElementById('daily').textContent = (d.daily_hours || '0.00') + ' h';
+                document.getElementById('daily-label').textContent = d.label || '';
+                document.getElementById('weekly').textContent = (w.weekly_hours || days.weekly_hours || '0.00') + ' h';
+                document.getElementById('weekly-label').textContent = w.label || '';
+
+                const container = document.getElementById('week-days');
+                if (days.days && days.days.length) {
+                    container.innerHTML = days.days.map(day => {
+                        const dt = new Date(day.date + 'T12:00:00');
+                        const name = DAY_NAMES[dt.getDay()] || day.date;
+                        return `<div class="flex justify-between items-center bg-gray-800 px-4 py-2 rounded-xl">
+                            <span class="text-gray-300">${name} <span class="text-gray-500 text-xs">${day.date}</span></span>
+                            <span class="text-yellow-300 font-semibold">${day.hours} h</span>
+                        </div>`;
+                    }).join('');
+                } else {
+                    container.innerHTML = '<div class="text-gray-500 text-center">Sin datos esta semana</div>';
+                }
+            } catch (e) {
+                console.error(e);
+            }
         }
 
         function logout() {
-            localStorage.clear();
+            clearInterval(timerInterval);
+            clearInterval(reminderInterval);
+            localStorage.removeItem('currentUserId');
+            localStorage.removeItem('currentUserName');
+            localStorage.removeItem('currentUserPhone');
             location.reload();
         }
 
-        // Auto-login
-        window.onload = () => {
+        // --- Notificaciones / recordatorios ---
+        async function requestNotificationPermission() {
+            if (!('Notification' in window)) return;
+            if (Notification.permission === 'default') {
+                try { await Notification.requestPermission(); } catch (_) {}
+            }
+        }
+
+        function laPazNowParts() {
+            const parts = new Intl.DateTimeFormat('en-CA', {
+                timeZone: TZ,
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', hour12: false
+            }).formatToParts(new Date());
+            const get = (t) => parts.find(p => p.type === t)?.value;
+            return {
+                date: `${get('year')}-${get('month')}-${get('day')}`,
+                hour: parseInt(get('hour'), 10),
+                minute: parseInt(get('minute'), 10)
+            };
+        }
+
+        async function showLocalNotification(title, body, tag) {
+            if (!('Notification' in window) || Notification.permission !== 'granted') return;
+            const opts = { body, tag, icon: '/manifest.json', renotify: true };
+            try {
+                if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+                    navigator.serviceWorker.controller.postMessage({
+                        type: 'SHOW_NOTIFICATION',
+                        title,
+                        options: opts
+                    });
+                } else {
+                    new Notification(title, opts);
+                }
+            } catch (e) {
+                try { new Notification(title, opts); } catch (_) {}
+            }
+        }
+
+        function startReminderLoop() {
+            clearInterval(reminderInterval);
+            checkReminders();
+            reminderInterval = setInterval(checkReminders, 60 * 1000);
+        }
+
+        async function checkReminders() {
+            if (!currentUserId) return;
+            const { date, hour } = laPazNowParts();
+
+            // Recordatorio prender: después de ~08:00 si no hay turno activo
+            if (hour >= 8 && hour < 12 && !currentEntryId) {
+                if (lastStartReminderDate !== date) {
+                    lastStartReminderDate = date;
+                    await showLocalNotification(
+                        '⏰ Hora de prender',
+                        'Todavía no registraste tu entrada. Tocá PRENDER cuando empieces.',
+                        'remind-start'
+                    );
+                }
+            }
+
+            // Recordatorio apagar: después de ~22:00 si sigue activo
+            if (hour >= 22 && currentEntryId) {
+                if (lastStopReminderDate !== date) {
+                    lastStopReminderDate = date;
+                    await showLocalNotification(
+                        '🌙 Hora de apagar',
+                        'Todavía tenés el turno abierto. Tocá APAGAR al terminar.',
+                        'remind-stop'
+                    );
+                }
+            }
+        }
+
+        // Auto-login desde localStorage + restaurar timer del servidor
+        window.onload = async () => {
             const savedId = localStorage.getItem('currentUserId');
             const savedName = localStorage.getItem('currentUserName');
+            const savedPhone = localStorage.getItem('currentUserPhone');
             if (savedId) {
-                currentUserId = parseInt(savedId);
-                showUserScreen(savedName || "Usuario");
+                currentUserId = parseInt(savedId, 10);
+                await enterUserScreen(savedName || 'Usuario', savedPhone || '');
             }
         };
     </script>
