@@ -19,7 +19,20 @@
 <body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
     <div class="max-w-md w-full bg-gray-800 p-8 rounded-3xl shadow-2xl">
 
-        <h1 class="text-3xl font-bold text-center mb-8 text-blue-400">⏱️ Control de Horas</h1>
+        <h1 class="text-3xl font-bold text-center mb-4 text-blue-400">⏱️ Control de Horas</h1>
+
+        <!-- Franja global de instalación (fuera de login/user; se oculta en standalone o admin) -->
+        <div id="install-strip-global" class="mb-6 p-4 rounded-2xl bg-emerald-800/90 border-2 border-emerald-400 shadow-lg space-y-2">
+            <p class="text-center text-emerald-100 font-bold text-lg">📲 Instalá la app en este teléfono</p>
+            <button type="button" onclick="installPWA()" id="installBtnGlobal" class="w-full bg-emerald-500 hover:bg-emerald-400 text-gray-900 py-4 rounded-2xl text-lg font-bold">
+                Instalar en este teléfono
+            </button>
+            <div id="install-help-global" class="hidden text-sm text-emerald-50 space-y-2 pt-1">
+                <p class="font-semibold text-amber-200">Si no aparece el diálogo automático:</p>
+                <p><span class="text-blue-200 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
+                <p><span class="text-green-200 font-medium">Android (Chrome):</span> menú <strong>⋮</strong> → <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
+            </div>
+        </div>
 
         <!-- Banner confirmación -->
         <div id="banner" class="hidden mb-4 p-4 rounded-2xl bg-emerald-700 text-center text-lg font-semibold"></div>
@@ -55,25 +68,32 @@
             <div class="text-center">
                 <div id="greeting" class="text-2xl font-bold text-blue-300"></div>
                 <div id="phone-label" class="text-gray-400 text-sm mt-1"></div>
-                <div id="status" class="text-green-400 text-xl mt-4">Listo para trabajar</div>
-                <div id="gps-status" class="text-xs text-gray-400 mt-2">Obteniendo ubicación…</div>
-                <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
-                <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
-                <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
             </div>
 
-            <!-- Instalar también en pantalla de usuario (auto-login salta el login) -->
-            <div id="install-block-user" class="space-y-3 p-4 rounded-2xl bg-gray-700/80 border border-emerald-600/40">
-                <p class="text-center text-emerald-300 font-semibold">Instalá la app en tu teléfono</p>
-                <button type="button" onclick="installPWA()" id="installBtnUser" class="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-3xl text-xl font-bold">
-                    📲 Instalar App
+            <!-- Instalar MUY visible arriba (antes de estado/timer) -->
+            <div id="install-block-user" class="space-y-3 p-5 rounded-3xl bg-emerald-700 border-4 border-emerald-300 shadow-xl">
+                <p class="text-center text-white font-bold text-2xl">📲 Instalá la app</p>
+                <button type="button" onclick="installPWA()" id="installBtnUser" class="w-full bg-white hover:bg-emerald-50 text-emerald-800 py-6 rounded-3xl text-xl font-extrabold">
+                    Instalar en este teléfono
                 </button>
-                <p class="text-center text-xs text-gray-400">Si no ves el diálogo, tocá el botón para ver cómo instalar</p>
-                <div id="install-help-user" class="hidden text-sm text-gray-300 space-y-2 pt-1">
-                    <p class="font-semibold text-amber-300">Si no aparece el diálogo automático:</p>
-                    <p><span class="text-blue-300 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
-                    <p><span class="text-green-300 font-medium">Android (Chrome):</span> menú <strong>⋮</strong> → <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
+                <p class="text-center text-sm text-emerald-100">Si no ves el diálogo, tocá el botón o seguí los pasos abajo</p>
+                <div id="install-help-user" class="text-sm text-emerald-50 space-y-2 pt-1 bg-emerald-900/40 p-3 rounded-2xl">
+                    <p class="font-semibold text-amber-200">Si no aparece el diálogo automático:</p>
+                    <p><span class="text-blue-200 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
+                    <p><span class="text-green-200 font-medium">Android (Chrome):</span> menú <strong>⋮</strong> → <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
                 </div>
+            </div>
+
+            <div class="text-center space-y-2">
+                <div id="status" class="text-green-400 text-xl">Listo para trabajar</div>
+                <div id="gps-status" class="text-sm text-gray-300 font-medium">Obteniendo ubicación…</div>
+                <button type="button" id="gps-enable-btn" onclick="enableGps()" class="hidden w-full bg-amber-500 hover:bg-amber-400 text-gray-900 py-3 rounded-2xl text-base font-bold">
+                    📍 Activar ubicación
+                </button>
+                <p id="gps-required-msg" class="hidden text-amber-300 text-sm px-2">La ubicación (GPS) es obligatoria para PRENDER y APAGAR.</p>
+                <div id="timer" class="clock text-blue-400 mt-4">00:00:00</div>
+                <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
+                <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
             </div>
 
             <div class="flex gap-4">
@@ -152,17 +172,38 @@
                 || window.navigator.standalone === true;
         }
 
+        function isAdminScreenVisible() {
+            const admin = document.getElementById('admin-screen');
+            return admin && !admin.classList.contains('hidden');
+        }
+
+        function showInstallHelp(forceShow) {
+            for (const id of ['install-help', 'install-help-user', 'install-help-global']) {
+                const help = document.getElementById(id);
+                if (!help) continue;
+                if (forceShow) help.classList.remove('hidden');
+                else help.classList.add('hidden');
+            }
+            // En pantalla usuario la ayuda queda siempre visible (por defecto expandida)
+            const userHelp = document.getElementById('install-help-user');
+            if (userHelp) userHelp.classList.remove('hidden');
+        }
+
         function updateInstallVisibility() {
             const standalone = isStandalonePWA();
+            const adminVisible = isAdminScreenVisible();
+
             for (const id of ['install-block', 'install-block-user']) {
                 const block = document.getElementById(id);
                 if (!block) continue;
-                // Solo ocultar cuando está claro que ya es PWA instalada
-                if (standalone) {
-                    block.classList.add('hidden');
-                } else {
-                    block.classList.remove('hidden');
-                }
+                if (standalone) block.classList.add('hidden');
+                else block.classList.remove('hidden');
+            }
+
+            const strip = document.getElementById('install-strip-global');
+            if (strip) {
+                if (standalone || adminVisible) strip.classList.add('hidden');
+                else strip.classList.remove('hidden');
             }
         }
 
@@ -180,14 +221,31 @@
                 updateInstallVisibility();
                 return;
             }
-            for (const id of ['install-help', 'install-help-user']) {
-                const help = document.getElementById(id);
-                if (help) help.classList.toggle('hidden');
-            }
+            // Sin beforeinstallprompt: SIEMPRE mostrar ayuda (no solo toggle vacío)
+            showInstallHelp(true);
+            alert('Para instalar: usá el menú del navegador → Instalar / Agregar a pantalla de inicio. Abajo tenés los pasos.');
         }
 
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').catch(console.error);
+        }
+
+        function updateGpsUi(ok) {
+            const btn = document.getElementById('gps-enable-btn');
+            const msg = document.getElementById('gps-required-msg');
+            if (btn) {
+                if (ok) btn.classList.add('hidden');
+                else btn.classList.remove('hidden');
+            }
+            if (msg) {
+                if (ok) msg.classList.add('hidden');
+                else msg.classList.remove('hidden');
+            }
+            // Deshabilitar PRENDER si no hay GPS y no hay turno activo
+            const startBtn = document.getElementById('startBtn');
+            if (startBtn && !currentEntryId) {
+                startBtn.disabled = !ok;
+            }
         }
 
         function setGpsStatus(text, ok) {
@@ -195,21 +253,23 @@
             if (!el) return;
             el.textContent = text;
             el.className = ok === true
-                ? 'text-xs text-emerald-400 mt-2'
+                ? 'text-sm text-emerald-400 font-medium'
                 : ok === false
-                    ? 'text-xs text-amber-400 mt-2'
-                    : 'text-xs text-gray-400 mt-2';
+                    ? 'text-sm text-amber-400 font-medium'
+                    : 'text-sm text-gray-300 font-medium';
+            if (ok === true) updateGpsUi(true);
+            else if (ok === false) updateGpsUi(false);
         }
 
-        /** GPS sin bloquear la UI para siempre: timeout y sigue. */
+        /** GPS requerido para prender/apagar. Timeout 12s. */
         function getGps() {
             return new Promise((resolve) => {
                 if (!navigator.geolocation) {
-                    setGpsStatus('Sin GPS', false);
+                    setGpsStatus('❌ Este teléfono no tiene GPS / geolocalización', false);
                     resolve(null);
                     return;
                 }
-                setGpsStatus('Obteniendo ubicación…', null);
+                setGpsStatus('📍 Obteniendo ubicación…', null);
                 navigator.geolocation.getCurrentPosition(
                     (pos) => {
                         const coords = {
@@ -217,17 +277,42 @@
                             longitude: pos.coords.longitude
                         };
                         lastGps = coords;
-                        setGpsStatus('Ubicación OK', true);
+                        setGpsStatus('✅ Ubicación OK', true);
                         resolve(coords);
                     },
-                    () => {
-                        setGpsStatus('Sin GPS', false);
+                    (err) => {
+                        lastGps = null;
+                        const denied = err && err.code === 1;
+                        setGpsStatus(
+                            denied
+                                ? '❌ Ubicación denegada — activá el GPS'
+                                : '❌ Sin GPS — activá la ubicación',
+                            false
+                        );
                         resolve(null);
                     },
-                    { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
+                    { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
                 );
             });
         }
+
+        async function enableGps() {
+            const gps = await getGps();
+            if (gps) {
+                await postLocation(gps);
+                return gps;
+            }
+            alert(
+                'No se pudo obtener la ubicación.\n\n' +
+                'En tu teléfono:\n' +
+                '1) Abrí Ajustes → Ubicación / GPS y activarlo.\n' +
+                '2) En Chrome: tocá el candado 🔒 junto a la URL → Permisos → Ubicación → Permitir.\n' +
+                '3) Volvé a tocar «Activar ubicación».'
+            );
+            return null;
+        }
+
+        const GPS_REQUIRED_MSG = 'Tenés que activar la ubicación (GPS) para registrar el turno.';
 
         async function postLocation(coords) {
             if (!currentUserId || !coords) return;
@@ -309,7 +394,9 @@
         function loginAsAdmin() {
             if (prompt('🔑 Contraseña de Administrador:') === 'admin') {
                 document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('user-screen').classList.add('hidden');
                 document.getElementById('admin-screen').classList.remove('hidden');
+                updateInstallVisibility();
                 loadAllUsers();
             } else {
                 alert('Contraseña incorrecta');
@@ -323,12 +410,15 @@
             document.getElementById('greeting').textContent = name || 'Usuario';
             document.getElementById('phone-label').textContent = phone ? `Tel: ${phone}` : '';
             updateInstallVisibility();
+            showInstallHelp(true);
             await restoreActiveEntry();
             await loadStats();
             requestNotificationPermission();
             startReminderLoop();
-            // GPS al abrir / restaurar sesión
-            getGps().then((coords) => postLocation(coords));
+            // GPS obligatorio al abrir / restaurar sesión
+            const coords = await getGps();
+            if (coords) await postLocation(coords);
+            else updateGpsUi(false);
         }
 
         async function restoreActiveEntry() {
@@ -341,7 +431,7 @@
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
                     document.getElementById('status').textContent = 'Turno en curso';
-                    document.getElementById('status').className = 'text-yellow-400 text-xl mt-4';
+                    document.getElementById('status').className = 'text-yellow-400 text-xl';
                     seedFractionNotifiedFromElapsed();
                     clearInterval(timerInterval);
                     timerInterval = setInterval(updateTimer, 1000);
@@ -365,10 +455,11 @@
             const credit = document.getElementById('credit-line');
             credit.classList.add('hidden');
             credit.textContent = 'Acreditaría: 0.0 h';
-            document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
             document.getElementById('status').textContent = 'Listo para trabajar';
-            document.getElementById('status').className = 'text-green-400 text-xl mt-4';
+            document.getElementById('status').className = 'text-green-400 text-xl';
+            // PRENDER solo si hay GPS
+            updateGpsUi(!!lastGps);
         }
 
         /** Evita reenviar avisos ya cruzados al restaurar un turno. */
@@ -404,11 +495,15 @@
 
         async function startTimer() {
             const gps = await getGps();
-            const body = { user_id: currentUserId };
-            if (gps) {
-                body.latitude = gps.latitude;
-                body.longitude = gps.longitude;
+            if (!gps) {
+                updateGpsUi(false);
+                return alert(GPS_REQUIRED_MSG);
             }
+            const body = {
+                user_id: currentUserId,
+                latitude: gps.latitude,
+                longitude: gps.longitude
+            };
 
             const res = await fetch('/start', {
                 method: 'POST',
@@ -432,7 +527,7 @@
             document.getElementById('startBtn').disabled = true;
             document.getElementById('stopBtn').disabled = false;
             document.getElementById('status').textContent = 'Turno en curso';
-            document.getElementById('status').className = 'text-yellow-400 text-xl mt-4';
+            document.getElementById('status').className = 'text-yellow-400 text-xl';
             clearInterval(timerInterval);
             timerInterval = setInterval(updateTimer, 1000);
             updateTimer();
@@ -485,11 +580,16 @@
 
         async function stopTimer() {
             const gps = await getGps();
-            const body = { entry_id: currentEntryId, user_id: currentUserId };
-            if (gps) {
-                body.latitude = gps.latitude;
-                body.longitude = gps.longitude;
+            if (!gps) {
+                updateGpsUi(false);
+                return alert(GPS_REQUIRED_MSG);
             }
+            const body = {
+                entry_id: currentEntryId,
+                user_id: currentUserId,
+                latitude: gps.latitude,
+                longitude: gps.longitude
+            };
 
             const res = await fetch('/stop', {
                 method: 'POST',
