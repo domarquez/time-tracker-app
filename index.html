@@ -37,6 +37,21 @@
         <!-- Banner confirmación -->
         <div id="banner" class="hidden mb-4 p-4 rounded-2xl bg-emerald-700 text-center text-lg font-semibold"></div>
 
+        <!-- Modal chequeo nocturno -->
+        <div id="night-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+            <div class="max-w-md w-full bg-gray-800 border-2 border-amber-400 rounded-3xl p-6 shadow-2xl space-y-4">
+                <p class="text-amber-300 text-center font-bold text-xl">🌙 Turno todavía abierto</p>
+                <p id="night-modal-msg" class="text-center text-gray-100 text-lg"></p>
+                <p class="text-center text-sm text-gray-400">Si no respondés en 15 minutos, el turno se apaga solo.</p>
+                <div class="flex gap-3">
+                    <button type="button" id="night-btn-continue" onclick="answerNightContinue()"
+                        class="flex-1 bg-green-600 hover:bg-green-700 py-4 rounded-2xl text-lg font-bold">Seguir</button>
+                    <button type="button" id="night-btn-stop" onclick="answerNightStop()"
+                        class="flex-1 bg-red-600 hover:bg-red-700 py-4 rounded-2xl text-lg font-bold">Apagar</button>
+                </div>
+            </div>
+        </div>
+
         <!-- LOGIN -->
         <div id="login-screen" class="space-y-5">
             <!-- Instalar: siempre visible primero (antes del teléfono) -->
@@ -143,6 +158,10 @@
         /** Por tramo de hora del turno: { half: bool, full: bool } */
         let fractionNotified = {};
         let lastGps = null;
+        /** Chequeo nocturno: fase pendiente '20' | '23' | null */
+        let nightAskPhase = null;
+        let nightModalVisible = false;
+        let lastNightNotifyKey = null;
 
         const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
@@ -425,6 +444,7 @@
             try {
                 const res = await fetch(`/active/${currentUserId}`);
                 const data = await res.json();
+                await applyNightResult(data.night, data.active);
                 if (data.active) {
                     currentEntryId = data.active.entry_id;
                     serverStartTime = new Date(data.active.start_time);
@@ -451,6 +471,9 @@
             currentEntryId = null;
             serverStartTime = null;
             fractionNotified = {};
+            nightAskPhase = null;
+            lastNightNotifyKey = null;
+            hideNightModal();
             document.getElementById('timer').textContent = '00:00:00';
             const credit = document.getElementById('credit-line');
             credit.classList.add('hidden');
@@ -701,6 +724,159 @@
             reminderInterval = setInterval(checkReminders, 60 * 1000);
         }
 
+        function hideNightModal() {
+            const el = document.getElementById('night-modal');
+            if (el) el.classList.add('hidden');
+            nightModalVisible = false;
+        }
+
+        function showNightModal(phase, message) {
+            nightAskPhase = phase;
+            const el = document.getElementById('night-modal');
+            const msg = document.getElementById('night-modal-msg');
+            if (msg) {
+                msg.textContent = message || (phase === '23'
+                    ? 'Son las 23:00. ¿Seguís hasta medianoche o apagamos?'
+                    : 'Pasaron las 20:00 y el turno sigue abierto. ¿Seguís contando horas?');
+            }
+            if (el) el.classList.remove('hidden');
+            nightModalVisible = true;
+        }
+
+        async function applyNightResult(night, active) {
+            if (!night) return;
+            if (night.action === 'auto_stopped') {
+                hideNightModal();
+                const hoursLabel = night.duration_hours != null
+                    ? `${night.duration_hours} h`
+                    : '';
+                const obs = night.observation || 'Corte automático nocturno';
+                const bannerMsg = hoursLabel
+                    ? `Turno cerrado: ${obs} — Acreditado: ${hoursLabel}`
+                    : `Turno cerrado: ${obs}`;
+                showBanner(bannerMsg, 12000);
+                resetTimerUI();
+                await loadStats();
+                return;
+            }
+            if (night.ask_continue && night.phase) {
+                showNightModal(night.phase, night.message);
+                const notifyKey = `${night.phase}-${(active && active.entry_id) || currentEntryId || ''}`;
+                if (lastNightNotifyKey !== notifyKey) {
+                    lastNightNotifyKey = notifyKey;
+                    await showLocalNotification(
+                        night.phase === '23'
+                            ? '🌙 23:00 — ¿Seguís hasta medianoche?'
+                            : '🌙 Turno abierto — ¿Seguís?',
+                        night.message || 'Respondé Seguir o Apagar. Sin respuesta se corta solo.',
+                        `night-ask-${night.phase}`
+                    );
+                }
+            } else {
+                hideNightModal();
+                nightAskPhase = null;
+            }
+        }
+
+        async function answerNightContinue() {
+            if (!currentUserId || !nightAskPhase) return;
+            try {
+                const res = await fetch('/night-continue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: currentUserId,
+                        entry_id: currentEntryId,
+                        phase: nightAskPhase
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    hideNightModal();
+                    nightAskPhase = null;
+                    lastNightNotifyKey = null;
+                    showBanner(data.message || 'Seguís contando horas.', 8000);
+                } else {
+                    alert(data.error || 'No se pudo registrar Seguir');
+                }
+            } catch (e) {
+                alert('Error de red al responder Seguir');
+            }
+        }
+
+        async function answerNightStop() {
+            // Apagado iniciado por el usuario → GPS obligatorio
+            const gps = await getGps();
+            if (!gps) {
+                updateGpsUi(false);
+                return alert(GPS_REQUIRED_MSG);
+            }
+            const phase = nightAskPhase || '20';
+            const observation = phase === '23'
+                ? 'Apagado por el usuario a las 23h'
+                : 'Apagado por el usuario (noche, no seguir)';
+            try {
+                const res = await fetch('/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        entry_id: currentEntryId,
+                        user_id: currentUserId,
+                        latitude: gps.latitude,
+                        longitude: gps.longitude,
+                        observation,
+                        stop_reason: 'usuario_no_noche'
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    hideNightModal();
+                    const hoursLabel = data.duration_hours != null
+                        ? `${data.duration_hours} h`
+                        : `${formatDecimalHours(data.duration_minutes)} h`;
+                    const bannerMsg = `Acreditado: ${hoursLabel} — ${observation}`;
+                    showBanner(bannerMsg, 10000);
+                    resetTimerUI();
+                    await loadStats();
+                } else {
+                    alert(data.error || 'No se pudo apagar');
+                }
+            } catch (e) {
+                alert('Error de red al apagar');
+            }
+        }
+
+        async function pollNightCheck() {
+            if (!currentUserId) return;
+            try {
+                const res = await fetch(`/night-check/${currentUserId}`);
+                const data = await res.json();
+                if (data.action === 'auto_stopped') {
+                    await applyNightResult(data, null);
+                    return;
+                }
+                if (data.active && data.entry_id && !currentEntryId) {
+                    // Servidor tiene turno; sincronizar UI
+                    await restoreActiveEntry();
+                    return;
+                }
+                if (!data.active && currentEntryId) {
+                    // Cerrado en servidor (cron)
+                    resetTimerUI();
+                    await loadStats();
+                    return;
+                }
+                await applyNightResult({
+                    action: data.action,
+                    ask_continue: data.ask_continue,
+                    phase: data.phase,
+                    message: data.message
+                }, data.active ? { entry_id: data.entry_id } : null);
+            } catch (e) {
+                console.error('night-check', e);
+            }
+        }
+
         async function checkReminders() {
             if (!currentUserId) return;
             const { date, hour } = laPazNowParts();
@@ -717,16 +893,9 @@
                 }
             }
 
-            // Recordatorio apagar: después de ~22:00 si sigue activo
-            if (hour >= 22 && currentEntryId) {
-                if (lastStopReminderDate !== date) {
-                    lastStopReminderDate = date;
-                    await showLocalNotification(
-                        '🌙 Hora de apagar',
-                        'Todavía tenés el turno abierto. Tocá APAGAR al terminar.',
-                        'remind-stop'
-                    );
-                }
+            // Chequeo nocturno 20:00 / 23:00 / medianoche (servidor autoritativo)
+            if (currentEntryId || hour >= 20 || hour < 1) {
+                await pollNightCheck();
             }
         }
 
