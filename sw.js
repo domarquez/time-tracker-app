@@ -1,4 +1,4 @@
-const CACHE_NAME = 'control-horas-v5';
+const CACHE_NAME = 'control-horas-v6';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
@@ -33,6 +33,25 @@ self.addEventListener('fetch', event => {
     url.pathname.startsWith('/login-admin')
   ) {
     event.respondWith(fetch(event.request));
+    return;
+  }
+
+  // Documentos (/, /index.html): network-first para no quedar con HTML viejo
+  const isDocumentNav =
+    event.request.mode === 'navigate' ||
+    url.pathname === '/' ||
+    url.pathname === '/index.html';
+
+  if (isDocumentNav) {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+          return response;
+        })
+        .catch(() => caches.match(event.request).then(r => r || caches.match('/')))
+    );
     return;
   }
 

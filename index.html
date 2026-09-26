@@ -32,6 +32,7 @@
                 <button type="button" onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-3xl text-xl font-bold">
                     📲 Instalar App
                 </button>
+                <p class="text-center text-xs text-gray-400">Si no ves el diálogo, tocá el botón para ver cómo instalar</p>
                 <div id="install-help" class="hidden text-sm text-gray-300 space-y-2 pt-1">
                     <p class="font-semibold text-amber-300">Si no aparece el diálogo automático:</p>
                     <p><span class="text-blue-300 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
@@ -59,6 +60,20 @@
                 <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
                 <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
                 <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
+            </div>
+
+            <!-- Instalar también en pantalla de usuario (auto-login salta el login) -->
+            <div id="install-block-user" class="space-y-3 p-4 rounded-2xl bg-gray-700/80 border border-emerald-600/40">
+                <p class="text-center text-emerald-300 font-semibold">Instalá la app en tu teléfono</p>
+                <button type="button" onclick="installPWA()" id="installBtnUser" class="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-3xl text-xl font-bold">
+                    📲 Instalar App
+                </button>
+                <p class="text-center text-xs text-gray-400">Si no ves el diálogo, tocá el botón para ver cómo instalar</p>
+                <div id="install-help-user" class="hidden text-sm text-gray-300 space-y-2 pt-1">
+                    <p class="font-semibold text-amber-300">Si no aparece el diálogo automático:</p>
+                    <p><span class="text-blue-300 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
+                    <p><span class="text-green-300 font-medium">Android (Chrome):</span> menú <strong>⋮</strong> → <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
+                </div>
             </div>
 
             <div class="flex gap-4">
@@ -138,12 +153,16 @@
         }
 
         function updateInstallVisibility() {
-            const block = document.getElementById('install-block');
-            if (!block) return;
-            if (isStandalonePWA()) {
-                block.classList.add('hidden');
-            } else {
-                block.classList.remove('hidden');
+            const standalone = isStandalonePWA();
+            for (const id of ['install-block', 'install-block-user']) {
+                const block = document.getElementById(id);
+                if (!block) continue;
+                // Solo ocultar cuando está claro que ya es PWA instalada
+                if (standalone) {
+                    block.classList.add('hidden');
+                } else {
+                    block.classList.remove('hidden');
+                }
             }
         }
 
@@ -161,8 +180,10 @@
                 updateInstallVisibility();
                 return;
             }
-            const help = document.getElementById('install-help');
-            if (help) help.classList.toggle('hidden');
+            for (const id of ['install-help', 'install-help-user']) {
+                const help = document.getElementById(id);
+                if (help) help.classList.toggle('hidden');
+            }
         }
 
         if ('serviceWorker' in navigator) {
@@ -301,6 +322,7 @@
             document.getElementById('user-screen').classList.remove('hidden');
             document.getElementById('greeting').textContent = name || 'Usuario';
             document.getElementById('phone-label').textContent = phone ? `Tel: ${phone}` : '';
+            updateInstallVisibility();
             await restoreActiveEntry();
             await loadStats();
             requestNotificationPermission();
