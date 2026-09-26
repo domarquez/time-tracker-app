@@ -1,4 +1,4 @@
-const CACHE_NAME = 'control-horas-v4';
+const CACHE_NAME = 'control-horas-v5';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
@@ -17,12 +17,13 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  // No cachear API (estado de turnos / totales)
+  // No cachear API (estado de turnos / totales / GPS)
   if (
     url.pathname.startsWith('/register') ||
     url.pathname.startsWith('/login') ||
     url.pathname.startsWith('/start') ||
     url.pathname.startsWith('/stop') ||
+    url.pathname.startsWith('/location') ||
     url.pathname.startsWith('/active') ||
     url.pathname.startsWith('/daily') ||
     url.pathname.startsWith('/weekly') ||

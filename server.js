@@ -135,6 +135,12 @@ async function initDB() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
   `);
 
+  // GPS al apagar (fin de turno)
+  await pool.query(`
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS end_latitude DOUBLE PRECISION;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS end_longitude DOUBLE PRECISION;
+  `);
+
   // Unique index on phone (allows multiple NULLs in Postgres)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users (phone) WHERE phone IS NOT NULL;
@@ -266,6 +272,36 @@ async function handleAuth(req, res) {
 app.post('/register', handleAuth);
 app.post('/login', handleAuth);
 
+/** Actualizar ubicación del usuario (abrir app / restaurar sesión). */
+app.post('/location', async (req, res) => {
+  const { user_id, latitude, longitude } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+  if (latitude == null && longitude == null) {
+    return res.status(400).json({ error: 'latitude/longitude requeridos' });
+  }
+  try {
+    const result = await pool.query(
+      `UPDATE users
+       SET latitude = COALESCE($1, latitude),
+           longitude = COALESCE($2, longitude)
+       WHERE id = $3
+       RETURNING id, latitude, longitude`,
+      [latitude ?? null, longitude ?? null, user_id]
+    );
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    res.json({
+      success: true,
+      user_id: result.rows[0].id,
+      latitude: result.rows[0].latitude,
+      longitude: result.rows[0].longitude
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/start', async (req, res) => {
   const { user_id, latitude, longitude } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
@@ -290,6 +326,14 @@ app.post('/start', async (req, res) => {
        RETURNING id, start_time`,
       [user_id, today, latitude || null, longitude || null]
     );
+
+    if (latitude != null || longitude != null) {
+      await pool.query(
+        `UPDATE users SET latitude = COALESCE($1, latitude), longitude = COALESCE($2, longitude) WHERE id = $3`,
+        [latitude, longitude, user_id]
+      );
+    }
+
     res.json({
       success: true,
       entry_id: result.rows[0].id,
@@ -304,7 +348,7 @@ app.post('/start', async (req, res) => {
 });
 
 app.post('/stop', async (req, res) => {
-  const { entry_id, user_id } = req.body;
+  const { entry_id, user_id, latitude, longitude } = req.body;
   try {
     let entry;
     if (entry_id) {
@@ -333,9 +377,21 @@ app.post('/stop', async (req, res) => {
     const minutes = detail.rounded;
 
     await pool.query(
-      'UPDATE time_entries SET end_time = NOW(), duration_minutes = $1 WHERE id = $2',
-      [minutes, row.id]
+      `UPDATE time_entries
+       SET end_time = NOW(),
+           duration_minutes = $1,
+           end_latitude = $2,
+           end_longitude = $3
+       WHERE id = $4`,
+      [minutes, latitude ?? null, longitude ?? null, row.id]
     );
+
+    if (latitude != null || longitude != null) {
+      await pool.query(
+        `UPDATE users SET latitude = COALESCE($1, latitude), longitude = COALESCE($2, longitude) WHERE id = $3`,
+        [latitude, longitude, row.user_id]
+      );
+    }
 
     const weekStart = await getWeekStartLaPaz(startTime.toISOString());
     await updateWeeklySummary(row.user_id, weekStart, minutes);
@@ -347,7 +403,9 @@ app.post('/stop', async (req, res) => {
       duration_minutes: minutes,
       duration_hours: fmt.hours,
       message: buildStopMessage(detail),
-      entry_id: row.id
+      entry_id: row.id,
+      end_latitude: latitude ?? null,
+      end_longitude: longitude ?? null
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

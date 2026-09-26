@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#3b82f6">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Horas">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
     <title>Control de Horas</title>
     <link rel="manifest" href="/manifest.json">
     <script src="https://cdn.tailwindcss.com"></script>
@@ -22,7 +26,20 @@
 
         <!-- LOGIN -->
         <div id="login-screen" class="space-y-5">
-            <p class="text-gray-400 text-sm text-center">Ingresá con tu número. La contraseña es el mismo teléfono.</p>
+            <!-- Instalar: siempre visible primero (antes del teléfono) -->
+            <div id="install-block" class="space-y-3 p-4 rounded-2xl bg-gray-700/80 border border-emerald-600/40">
+                <p class="text-center text-emerald-300 font-semibold">Primero instalá la app en tu teléfono</p>
+                <button type="button" onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-5 rounded-3xl text-xl font-bold">
+                    📲 Instalar App
+                </button>
+                <div id="install-help" class="hidden text-sm text-gray-300 space-y-2 pt-1">
+                    <p class="font-semibold text-amber-300">Si no aparece el diálogo automático:</p>
+                    <p><span class="text-blue-300 font-medium">iPhone / iPad (Safari):</span> tocá <strong>Compartir</strong> (□↑) → <strong>Agregar a pantalla de inicio</strong>.</p>
+                    <p><span class="text-green-300 font-medium">Android (Chrome):</span> menú <strong>⋮</strong> → <strong>Instalar aplicación</strong> o <strong>Agregar a pantalla de inicio</strong>.</p>
+                </div>
+            </div>
+
+            <p class="text-gray-400 text-sm text-center">Después ingresá con tu número de teléfono. La contraseña es el mismo teléfono.</p>
             <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Número de teléfono" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
             <input id="name" type="text" autocomplete="name" placeholder="Nombre completo (solo la 1ª vez)" class="w-full p-4 bg-gray-700 rounded-2xl text-xl">
             <p id="login-hint" class="text-amber-400 text-sm hidden"></p>
@@ -30,10 +47,6 @@
             <button onclick="loginUser()" class="w-full bg-blue-600 hover:bg-blue-700 py-5 rounded-3xl text-xl font-bold">ENTRAR</button>
 
             <button onclick="loginAsAdmin()" class="w-full bg-purple-600 hover:bg-purple-700 py-4 rounded-3xl text-lg font-semibold">👑 Administrador</button>
-
-            <button onclick="installPWA()" id="installBtn" class="w-full bg-emerald-600 hover:bg-emerald-700 py-4 rounded-3xl text-sm hidden">
-                📲 Instalar App
-            </button>
         </div>
 
         <!-- USER SCREEN -->
@@ -42,6 +55,7 @@
                 <div id="greeting" class="text-2xl font-bold text-blue-300"></div>
                 <div id="phone-label" class="text-gray-400 text-sm mt-1"></div>
                 <div id="status" class="text-green-400 text-xl mt-4">Listo para trabajar</div>
+                <div id="gps-status" class="text-xs text-gray-400 mt-2">Obteniendo ubicación…</div>
                 <div id="timer" class="clock text-blue-400 mt-6">00:00:00</div>
                 <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
                 <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
@@ -93,6 +107,7 @@
         let lastStopReminderDate = null;
         /** Por tramo de hora del turno: { half: bool, full: bool } */
         let fractionNotified = {};
+        let lastGps = null;
 
         const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
@@ -117,9 +132,25 @@
             return isHalfStep ? h.toFixed(1) : h.toFixed(2);
         }
 
+        function isStandalonePWA() {
+            return window.matchMedia('(display-mode: standalone)').matches
+                || window.navigator.standalone === true;
+        }
+
+        function updateInstallVisibility() {
+            const block = document.getElementById('install-block');
+            if (!block) return;
+            if (isStandalonePWA()) {
+                block.classList.add('hidden');
+            } else {
+                block.classList.remove('hidden');
+            }
+        }
+
         window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
             deferredPrompt = e;
-            document.getElementById('installBtn').classList.remove('hidden');
+            updateInstallVisibility();
         });
 
         async function installPWA() {
@@ -127,12 +158,71 @@
                 deferredPrompt.prompt();
                 await deferredPrompt.userChoice;
                 deferredPrompt = null;
-                document.getElementById('installBtn').classList.add('hidden');
+                updateInstallVisibility();
+                return;
             }
+            const help = document.getElementById('install-help');
+            if (help) help.classList.toggle('hidden');
         }
 
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').catch(console.error);
+        }
+
+        function setGpsStatus(text, ok) {
+            const el = document.getElementById('gps-status');
+            if (!el) return;
+            el.textContent = text;
+            el.className = ok === true
+                ? 'text-xs text-emerald-400 mt-2'
+                : ok === false
+                    ? 'text-xs text-amber-400 mt-2'
+                    : 'text-xs text-gray-400 mt-2';
+        }
+
+        /** GPS sin bloquear la UI para siempre: timeout y sigue. */
+        function getGps() {
+            return new Promise((resolve) => {
+                if (!navigator.geolocation) {
+                    setGpsStatus('Sin GPS', false);
+                    resolve(null);
+                    return;
+                }
+                setGpsStatus('Obteniendo ubicación…', null);
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                        const coords = {
+                            latitude: pos.coords.latitude,
+                            longitude: pos.coords.longitude
+                        };
+                        lastGps = coords;
+                        setGpsStatus('Ubicación OK', true);
+                        resolve(coords);
+                    },
+                    () => {
+                        setGpsStatus('Sin GPS', false);
+                        resolve(null);
+                    },
+                    { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
+                );
+            });
+        }
+
+        async function postLocation(coords) {
+            if (!currentUserId || !coords) return;
+            try {
+                await fetch('/location', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: currentUserId,
+                        latitude: coords.latitude,
+                        longitude: coords.longitude
+                    })
+                });
+            } catch (e) {
+                console.error(e);
+            }
         }
 
         function showBanner(msg, ms = 8000) {
@@ -159,10 +249,17 @@
 
             if (!phone) return alert('Ingresá tu número de teléfono');
 
+            const gps = await getGps();
+            const body = { phone, name: name || undefined };
+            if (gps) {
+                body.latitude = gps.latitude;
+                body.longitude = gps.longitude;
+            }
+
             const res = await fetch('/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone, name: name || undefined })
+                body: JSON.stringify(body)
             });
             const data = await res.json();
 
@@ -208,6 +305,8 @@
             await loadStats();
             requestNotificationPermission();
             startReminderLoop();
+            // GPS al abrir / restaurar sesión
+            getGps().then((coords) => postLocation(coords));
         }
 
         async function restoreActiveEntry() {
@@ -282,10 +381,17 @@
         }
 
         async function startTimer() {
+            const gps = await getGps();
+            const body = { user_id: currentUserId };
+            if (gps) {
+                body.latitude = gps.latitude;
+                body.longitude = gps.longitude;
+            }
+
             const res = await fetch('/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: currentUserId })
+                body: JSON.stringify(body)
             });
             const data = await res.json();
 
@@ -356,10 +462,17 @@
         }
 
         async function stopTimer() {
+            const gps = await getGps();
+            const body = { entry_id: currentEntryId, user_id: currentUserId };
+            if (gps) {
+                body.latitude = gps.latitude;
+                body.longitude = gps.longitude;
+            }
+
             const res = await fetch('/stop', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ entry_id: currentEntryId, user_id: currentUserId })
+                body: JSON.stringify(body)
             });
             const data = await res.json();
             if (data.success) {
@@ -497,12 +610,16 @@
 
         // Auto-login desde localStorage + restaurar timer del servidor
         window.onload = async () => {
+            updateInstallVisibility();
             const savedId = localStorage.getItem('currentUserId');
             const savedName = localStorage.getItem('currentUserName');
             const savedPhone = localStorage.getItem('currentUserPhone');
             if (savedId) {
                 currentUserId = parseInt(savedId, 10);
                 await enterUserScreen(savedName || 'Usuario', savedPhone || '');
+            } else {
+                // Pedir GPS temprano en login (si el usuario acepta, queda listo)
+                getGps();
             }
         };
     </script>
