@@ -305,6 +305,11 @@ app.post('/location', async (req, res) => {
 app.post('/start', async (req, res) => {
   const { user_id, latitude, longitude } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+  if (latitude == null || longitude == null || latitude === '' || longitude === '') {
+    return res.status(400).json({
+      error: 'Tenés que activar la ubicación (GPS) para registrar el turno.'
+    });
+  }
 
   try {
     const open = await pool.query(
@@ -349,6 +354,11 @@ app.post('/start', async (req, res) => {
 
 app.post('/stop', async (req, res) => {
   const { entry_id, user_id, latitude, longitude } = req.body;
+  if (latitude == null || longitude == null || latitude === '' || longitude === '') {
+    return res.status(400).json({
+      error: 'Tenés que activar la ubicación (GPS) para registrar el turno.'
+    });
+  }
   try {
     let entry;
     if (entry_id) {
