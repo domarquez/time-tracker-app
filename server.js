@@ -1078,7 +1078,9 @@ app.post('/admin/test-whatsapp', (req, res) => {
   if (!st.enabled) {
     return res.status(503).json({
       success: false,
-      error: 'WhatsApp deshabilitado: falta CALLMEBOT_APIKEY o WHATSAPP_ENABLED=false',
+      error: st.configured
+        ? 'WhatsApp deshabilitado (WHATSAPP_ENABLED=false)'
+        : `WhatsApp sin configurar para el proveedor "${st.provider}" (Evolution: EVOLUTION_BASE_URL + EVOLUTION_API_KEY; CallMeBot: CALLMEBOT_APIKEY; TextMeBot: TEXTMEBOT_APIKEY)`,
       whatsapp: st
     });
   }

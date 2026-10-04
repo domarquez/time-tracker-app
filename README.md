@@ -57,21 +57,34 @@ PORT=3000
 
 > Neon/Postgres suelen requerir SSL; el servidor usa `rejectUnauthorized: false` cuando hay `DATABASE_URL`.
 
-### WhatsApp al admin (CallMeBot)
+### WhatsApp al admin (Evolution API v2)
+
+Las alertas se envían **solo** a `ADMIN_WHATSAPP_PHONE` mediante una instancia propia de **Evolution API v2**:
+
+```
+POST {EVOLUTION_BASE_URL}/message/sendText/{EVOLUTION_INSTANCE}
+apikey: <EVOLUTION_API_KEY>
+Content-Type: application/json
+
+{ "number": "59167827075", "text": "..." }
+```
+
+Éxito = respuesta 2xx (Evolution devuelve 201 con `key.id`). Si `WHATSAPP_PROVIDER` no está definido y existen `EVOLUTION_BASE_URL` + `EVOLUTION_API_KEY`, se usa Evolution automáticamente.
 
 | Variable | Default | Descripción |
 |----------|---------|-------------|
-| `CALLMEBOT_APIKEY` | — | Apikey de CallMeBot. **Sin apikey no se envía nada** (solo se loguea y se omite; nunca rompe). |
-| `ADMIN_WHATSAPP_PHONE` | `+59167827075` | Número del admin (formato internacional con `+`). |
-| `WHATSAPP_ENABLED` | `true` si hay apikey | `false` apaga todos los envíos. |
-| `WHATSAPP_PROVIDER` | `callmebot` | `textmebot` para usar TextMeBot (`TEXTMEBOT_APIKEY`). |
-| `TEXTMEBOT_APIKEY` | — | Solo si `WHATSAPP_PROVIDER=textmebot`. |
+| `EVOLUTION_BASE_URL` | — | URL base de Evolution (se quita la `/` final). |
+| `EVOLUTION_API_KEY` | — | Header `apikey`. |
+| `EVOLUTION_INSTANCE` | `precios-ferreterias` | Nombre de la instancia. |
+| `ADMIN_WHATSAPP_PHONE` | `+59167827075` | Único destinatario (se envían solo los dígitos). |
+| `WHATSAPP_PROVIDER` | auto | `evolution` \| `callmebot` \| `textmebot`. Auto: `evolution` si hay URL + apikey de Evolution; si no, `callmebot`. |
+| `WHATSAPP_ENABLED` | `true` si el proveedor está configurado | `false` apaga todos los envíos. **Sin configuración no se envía nada** (solo log; nunca rompe). |
 | `WHATSAPP_REALTIME_ENABLED` | `true` | `false` = solo resúmenes (sin alertas de PRENDER/APAGAR/corte). |
-| `WHATSAPP_MIN_GAP_MS` | `8000` | Separación mínima entre mensajes (límite del plan gratuito). |
+| `WHATSAPP_MIN_GAP_MS` | `8000` | Separación mínima entre mensajes (la instancia se comparte con otros envíos). |
 | `DAILY_SUMMARY_TIME` | `21:30` | Hora (La Paz) del resumen diario, lunes a sábado. |
 | `WEEKLY_SUMMARY_TIME` | `21:45` | Hora (La Paz) del resumen semanal, sábado. |
 
-**Obtener la apikey:** agendar el número de CallMeBot (ver https://www.callmebot.com/blog/free-api-whatsapp-messages/), enviarle por WhatsApp *"I allow callmebot to send me messages"* desde el teléfono del admin y copiar la apikey que responde en `CALLMEBOT_APIKEY` (Railway → Variables).
+**Alternativas (opcionales):** `WHATSAPP_PROVIDER=callmebot` + `CALLMEBOT_APIKEY` (API gratuita de CallMeBot) o `WHATSAPP_PROVIDER=textmebot` + `TEXTMEBOT_APIKEY`.
 
 **Qué se envía** (hora America/La_Paz):
 
@@ -113,7 +126,7 @@ Los envíos pasan por una cola en memoria (≥ 8 s entre mensajes, 1 reintento) 
 ## Estructura
 
 - `server.js` — API + migración de `phone` + índices + redondeo
-- `notifier.js` — envío WhatsApp (CallMeBot / TextMeBot) con cola y reintento
+- `notifier.js` — envío WhatsApp (Evolution API v2; alternativas CallMeBot / TextMeBot) con cola y reintento
 - `whatsapp-reports.js` — alertas en tiempo real + resúmenes programados (`notification_log`)
 - `index.html` — UI PWA
 - `sw.js` — cache v8 + notificaciones por mensaje
