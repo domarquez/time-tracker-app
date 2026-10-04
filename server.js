@@ -1,10 +1,12 @@
 const express = require('express');
-const { Pool } = require('pg');
+const pg = require('pg');
+const { Pool } = pg;
 const cors = require('cors');
 const bodyParser = require('body-parser');
 require('dotenv').config();
 const notifier = require('./notifier');
 const { createWhatsappReports } = require('./whatsapp-reports');
+const { laPazDate, entryDay } = require('./tz-sql');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -13,6 +15,12 @@ const TZ = 'America/La_Paz';
 app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static(__dirname));
+
+// time_entries.start_time/end_time son TIMESTAMP sin zona con hora de pared UTC.
+// Leerlos/escribirlos siempre como UTC, sin depender de la zona del proceso Node
+// (por defecto pg los interpreta en la zona local del proceso).
+pg.types.setTypeParser(1114, (v) => (v == null ? null : new Date(`${v.replace(' ', 'T')}Z`)));
+pg.defaults.parseInputDatesAsUTC = true;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -303,7 +311,7 @@ async function handleAuth(req, res) {
 async function getLaPazClock() {
   const r = await pool.query(
     `SELECT
-       (NOW() AT TIME ZONE $1)::date AS today,
+       (NOW() AT TIME ZONE $1)::date::text AS today,
        EXTRACT(HOUR FROM (NOW() AT TIME ZONE $1))::int AS hour,
        EXTRACT(MINUTE FROM (NOW() AT TIME ZONE $1))::int AS minute,
        NOW() AS now_utc`,
@@ -380,11 +388,11 @@ async function midnightAfterStartLaPaz(startTime) {
 async function evaluateNightForEntry(row) {
   const clock = await getLaPazClock();
   const startDateRes = await pool.query(
-    `SELECT (start_time AT TIME ZONE $2)::date AS start_date,
+    `SELECT ${laPazDate('start_time')}::text AS start_date,
             night_acked_phase, night_ask_at, night_ask_phase,
             EXTRACT(EPOCH FROM (NOW() - night_ask_at)) AS ask_age_sec
      FROM time_entries WHERE id = $1`,
-    [row.id, TZ]
+    [row.id]
   );
   const meta = startDateRes.rows[0];
   const startDate = meta.start_date;
@@ -589,7 +597,7 @@ app.post('/start', async (req, res) => {
     const today = await getTodayLaPaz();
     const result = await pool.query(
       `INSERT INTO time_entries (user_id, start_time, date, latitude, longitude)
-       VALUES ($1, NOW(), $2, $3, $4)
+       VALUES ($1, NOW() AT TIME ZONE 'UTC', $2, $3, $4)
        RETURNING id, start_time`,
       [user_id, today, latitude || null, longitude || null]
     );
@@ -665,7 +673,7 @@ app.post('/stop', async (req, res) => {
 
     const upd = await pool.query(
       `UPDATE time_entries
-       SET end_time = NOW(),
+       SET end_time = NOW() AT TIME ZONE 'UTC',
            duration_minutes = $1,
            end_latitude = $2,
            end_longitude = $3,
@@ -929,12 +937,9 @@ app.get('/daily/:user_id', async (req, res) => {
       `SELECT COALESCE(SUM(duration_minutes), 0) AS total
        FROM time_entries
        WHERE user_id = $1
-         AND (
-           date = $2
-           OR (date IS NULL AND (start_time AT TIME ZONE $3)::date = $2)
-         )
+         AND ${entryDay('')} = $2::date
          AND end_time IS NOT NULL`,
-      [user_id, today, TZ]
+      [user_id, today]
     );
     const fmt = formatHours(result.rows[0].total);
     res.json({
@@ -958,9 +963,9 @@ app.get('/weekly/:user_id', async (req, res) => {
        FROM time_entries
        WHERE user_id = $1
          AND end_time IS NOT NULL
-         AND (start_time AT TIME ZONE $2)::date >= $3::date
-         AND (start_time AT TIME ZONE $2)::date < ($3::date + INTERVAL '6 days')`,
-      [user_id, TZ, weekStart]
+         AND ${entryDay('')} >= $2::date
+         AND ${entryDay('')} < ($2::date + 6)`,
+      [user_id, weekStart]
     );
     const fmt = formatHours(result.rows[0].total);
     res.json({
@@ -989,10 +994,10 @@ app.get('/week-days/:user_id', async (req, res) => {
        LEFT JOIN time_entries te
          ON te.user_id = $1
         AND te.end_time IS NOT NULL
-        AND (te.start_time AT TIME ZONE $3)::date = d.day
+        AND ${entryDay('te')} = d.day
        GROUP BY d.day
        ORDER BY d.day`,
-      [user_id, weekStart, TZ]
+      [user_id, weekStart]
     );
 
     const days = result.rows.map((r) => {
@@ -1118,7 +1123,7 @@ app.post('/admin/whatsapp-summary', async (req, res) => {
   }
 });
 
-// Resúmenes WhatsApp (diario 21:30 lun–sáb, semanal sáb 21:45, La Paz)
+// WhatsApp: aviso "sigue prendido" 20:00, diario 21:30 lun–sáb, semanal sáb 21:45 (La Paz)
 whatsapp.startScheduler();
 
 // Cron cada 60s: cortes nocturnos / medianoche aunque el cliente no pollee

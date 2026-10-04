@@ -5,17 +5,21 @@
  * reinicios/redeploys.
  *
  * Horarios (America/La_Paz):
+ *  - Aviso "sigue prendido": todos los días desde LEFT_ON_ALERT_TIME (default 20:00),
+ *    una vez por turno abierto y por día (notification_log kind 'left_on:<entry_id>')
  *  - Resumen diario:  lunes a sábado, DAILY_SUMMARY_TIME  (default 21:30)
  *  - Resumen semanal: sábado,         WEEKLY_SUMMARY_TIME (default 21:45)
  * Si el servidor estuvo caído a esa hora, se envía en cuanto vuelve
  * (mientras sea el mismo día en La Paz).
  */
 const notifier = require('./notifier');
+const { laPazWall, entryDay } = require('./tz-sql');
 
 const DIAS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
 const WEEKDAY_IDX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 const MAX_ATTEMPTS = 3;
 const MAX_OBS_LINES = 10;
+const MAX_SEGMENTS = 6; // tramos por trabajador en el diario
 
 function parseHHMM(value, fallback) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim());
@@ -136,23 +140,29 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
   }
 
   // ---------- Resúmenes ----------
-  /** Resumen diario para dateStr (YYYY-MM-DD, La Paz). */
+  const isAutoCut = (r) => ['medianoche', 'sin_respuesta_noche', 'auto'].includes(r.stop_reason)
+    || /^corte autom[aá]tico/i.test(String(r.observation || '').trim());
+
+  /** Resumen diario para dateStr (YYYY-MM-DD, La Paz): entradas/salidas por trabajador. */
   async function buildDailySummary(dateStr) {
-    const [users, today, open] = await Promise.all([
+    const [users, entries, open] = await Promise.all([
       pool.query(`SELECT id, name FROM users WHERE phone IS NOT NULL ORDER BY name`),
       pool.query(
-        `SELECT te.user_id, u.name,
-                COALESCE(SUM(te.duration_minutes) FILTER (WHERE te.end_time IS NOT NULL), 0)::int AS minutes,
-                COUNT(*) FILTER (WHERE te.end_time IS NULL)::int AS open_count
+        `SELECT te.id, te.user_id, u.name, te.duration_minutes, te.stop_reason, te.observation,
+                (te.end_time IS NULL) AS is_open,
+                to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm,
+                to_char(${laPazWall('te.end_time')}, 'HH24:MI') AS end_hm
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
-         WHERE COALESCE(te.date, (te.start_time AT TIME ZONE $2)::date) = $1::date
-         GROUP BY te.user_id, u.name
-         ORDER BY u.name`,
-        [dateStr, TZ]
+         WHERE ${entryDay('te')} = $1::date
+           AND NOT (te.end_time IS NOT NULL AND te.end_time = te.start_time AND COALESCE(te.duration_minutes, 0) = 0)
+         ORDER BY u.name, te.start_time`,
+        [dateStr]
       ),
       pool.query(
-        `SELECT te.user_id, u.name, te.start_time
+        `SELECT u.name,
+                ${entryDay('te')}::text AS day,
+                to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
          WHERE te.end_time IS NULL
@@ -160,15 +170,29 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
       )
     ]);
 
-    const registered = new Set(today.rows.map((r) => r.user_id));
-    const missing = users.rows.filter((u) => !registered.has(u.id));
+    // Agrupar tramos por trabajador (orden: nombre, hora de entrada)
+    const byUser = new Map();
+    for (const r of entries.rows) {
+      if (!byUser.has(r.user_id)) byUser.set(r.user_id, { name: r.name, minutes: 0, segs: [] });
+      const u = byUser.get(r.user_id);
+      if (r.is_open) {
+        u.segs.push(`${r.start_hm}–(sigue prendido)`);
+      } else {
+        u.minutes += Number(r.duration_minutes) || 0;
+        u.segs.push(`${r.start_hm}–${r.end_hm}${isAutoCut(r) ? ' ⚠️ corte automático' : ''}`);
+      }
+    }
+    const missing = users.rows.filter((u) => !byUser.has(u.id));
 
     const lines = [`📋 *Resumen del día* ${DIAS[weekdayOf(dateStr)]} ${ddmm(dateStr)}`];
-    if (today.rows.length) {
-      lines.push(`✅ Registraron (${today.rows.length}):`);
-      for (const r of today.rows) {
-        const openTxt = r.open_count ? (r.minutes ? ' + turno abierto' : 'turno abierto') : '';
-        lines.push(`• *${r.name}*: ${r.minutes || !r.open_count ? h(r.minutes) : ''}${openTxt}`);
+    if (byUser.size) {
+      lines.push(`✅ Registraron (${byUser.size}):`);
+      for (const u of byUser.values()) {
+        const segs = u.segs.length > MAX_SEGMENTS
+          ? [...u.segs.slice(0, MAX_SEGMENTS), `… +${u.segs.length - MAX_SEGMENTS}`]
+          : u.segs;
+        const allOpen = u.minutes === 0 && u.segs.every((x) => x.endsWith('(sigue prendido)'));
+        lines.push(`• *${u.name}*: ${segs.join(', ')}${allOpen ? '' : ` (${h(u.minutes)})`}`);
       }
     } else {
       lines.push('✅ Nadie registró hoy.');
@@ -178,7 +202,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     }
     if (open.rows.length) {
       lines.push(`⏳ No apagaron (${open.rows.length}): ${open.rows
-        .map((r) => `${r.name} (desde ${hhmm(r.start_time)})`)
+        .map((r) => `${r.name} (desde ${r.day === dateStr ? '' : `${ddmm(r.day)} `}${r.start_hm})`)
         .join(', ')}`);
     }
     return lines.join('\n');
@@ -195,22 +219,22 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
          LEFT JOIN time_entries te
            ON te.user_id = u.id
           AND te.end_time IS NOT NULL
-          AND COALESCE(te.date, (te.start_time AT TIME ZONE $3)::date) BETWEEN $1::date AND $2::date
+          AND ${entryDay('te')} BETWEEN $1::date AND $2::date
          GROUP BY u.id, u.name
          HAVING COALESCE(SUM(te.duration_minutes), 0) > 0 OR bool_or(u.phone IS NOT NULL)
          ORDER BY minutes DESC, u.name`,
-        [weekStart, weekEnd, TZ]
+        [weekStart, weekEnd]
       ),
       pool.query(
         `SELECT u.name,
-                COALESCE(te.date, (te.start_time AT TIME ZONE $3)::date)::text AS day,
+                ${entryDay('te')}::text AS day,
                 te.observation, te.stop_reason
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
          WHERE te.observation IS NOT NULL AND te.observation <> ''
-           AND COALESCE(te.date, (te.start_time AT TIME ZONE $3)::date) BETWEEN $1::date AND $2::date
+           AND ${entryDay('te')} BETWEEN $1::date AND $2::date
          ORDER BY day, u.name`,
-        [weekStart, weekEnd, TZ]
+        [weekStart, weekEnd]
       ),
       pool.query(`SELECT COUNT(*)::int AS n FROM time_entries WHERE end_time IS NULL`)
     ]);
@@ -289,6 +313,43 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     return result.ok;
   }
 
+  // ---------- Aviso "sigue prendido" (20:00 La Paz) ----------
+  /**
+   * Turnos abiertos que ya estaban prendidos a la hora de corte (default 20:00)
+   * del día dateStr. Uno por turno y por día gracias a notification_log.
+   */
+  async function findLeftOn(dateStr, cutoffHHMM, now = new Date()) {
+    const r = await pool.query(
+      `SELECT te.id, te.user_id, u.name,
+              ${entryDay('te')}::text AS day,
+              to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm,
+              FLOOR(EXTRACT(EPOCH FROM (($3::timestamptz AT TIME ZONE 'UTC') - te.start_time)) / 60)::int AS raw_minutes
+       FROM time_entries te
+       JOIN users u ON u.id = te.user_id
+       WHERE te.end_time IS NULL
+         AND ${laPazWall('te.start_time')} < ($1::date + $2::time)
+       ORDER BY u.name`,
+      [dateStr, cutoffHHMM, new Date(now).toISOString()]
+    );
+    return r.rows;
+  }
+
+  function leftOnText(row, dateStr, now = new Date()) {
+    const desde = `${row.day === dateStr ? '' : `${ddmm(row.day)} `}${row.start_hm}`;
+    const horas = (Math.max(0, row.raw_minutes) / 60).toFixed(1);
+    return `🌙 *${row.name}* sigue prendido a las ${hhmm(now)} — desde ${desde} (${horas} h). ¿Se olvidó de apagar?`;
+  }
+
+  async function runLeftOnAlerts(p, now) {
+    if (!realtimeEnabled()) return;
+    const at = parseHHMM(process.env.LEFT_ON_ALERT_TIME, 20 * 60);
+    if (p.hour * 60 + p.minute < at) return;
+    const cutoff = `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`;
+    for (const row of await findLeftOn(p.date, cutoff, now)) {
+      await runOnce(`left_on:${row.id}`, p.date, async () => leftOnText(row, p.date, now));
+    }
+  }
+
   // ---------- Scheduler (cada minuto) ----------
   let ticking = false;
   async function tick(now = new Date()) {
@@ -300,6 +361,12 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
       const minuteOfDay = p.hour * 60 + p.minute;
       const dailyAt = parseHHMM(process.env.DAILY_SUMMARY_TIME, 21 * 60 + 30);
       const weeklyAt = parseHHMM(process.env.WEEKLY_SUMMARY_TIME, 21 * 60 + 45);
+
+      try {
+        await runLeftOnAlerts(p, now);
+      } catch (e) {
+        console.error('[whatsapp] left_on:', e.message);
+      }
 
       if (p.weekday >= 1 && p.weekday <= 6 && minuteOfDay >= dailyAt) {
         await runOnce('daily_summary', p.date, () => buildDailySummary(p.date));
@@ -326,6 +393,8 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     alertAutoCut,
     buildDailySummary,
     buildWeeklySummary,
+    findLeftOn,
+    leftOnText,
     tick,
     startScheduler,
     laPazParts,

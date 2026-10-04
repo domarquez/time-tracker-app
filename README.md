@@ -83,14 +83,18 @@ Content-Type: application/json
 | `WHATSAPP_MIN_GAP_MS` | `8000` | Separación mínima entre mensajes (la instancia se comparte con otros envíos). |
 | `DAILY_SUMMARY_TIME` | `21:30` | Hora (La Paz) del resumen diario, lunes a sábado. |
 | `WEEKLY_SUMMARY_TIME` | `21:45` | Hora (La Paz) del resumen semanal, sábado. |
+| `LEFT_ON_ALERT_TIME` | `20:00` | Hora (La Paz) del aviso “sigue prendido” (todos los días; se apaga con `WHATSAPP_REALTIME_ENABLED=false`). |
 
 **Alternativas (opcionales):** `WHATSAPP_PROVIDER=callmebot` + `CALLMEBOT_APIKEY` (API gratuita de CallMeBot) o `WHATSAPP_PROVIDER=textmebot` + `TEXTMEBOT_APIKEY`.
 
 **Qué se envía** (hora America/La_Paz):
 
 - Tiempo real: `🟢 *Nombre* prendió a las HH:MM`, `🔴 *Nombre* apagó a las HH:MM — X.X h`, `⚠️ *Nombre*: corte automático (motivo) — X.X h` (20h/23h sin respuesta, medianoche).
-- **Resumen diario** lun–sáb 21:30: quién registró hoy (horas), quién no registró (usuarios con teléfono sin turno hoy) y quién no apagó.
+- **Sigue prendido** (20:00, todos los días): `🌙 *Nombre* sigue prendido a las 20:00 — desde 08:02 (12.0 h). ¿Se olvidó de apagar?` — una vez por turno abierto y por día (`notification_log` con `kind = left_on:<id del turno>`). Solo turnos que ya estaban prendidos antes de las 20:00.
+- **Resumen diario** lun–sáb 21:30: por trabajador, cada entrada–salida del día en hora La Paz y las horas acreditadas, p. ej. `• *Carmelo*: 08:02–12:10, 13:05–17:40 (8.5 h)`; turnos abiertos como `08:00–(sigue prendido)` y cortes automáticos con `⚠️ corte automático`. Luego quién no registró (usuarios con teléfono sin turno hoy) y quién no apagó.
 - **Resumen semanal** sábado 21:45: horas por trabajador lun–sáb + total, y observaciones (cortes automáticos).
+
+> **Zona horaria:** `time_entries.start_time` / `end_time` son `TIMESTAMP` sin zona y guardan la hora **UTC**. Para pasarlos a La Paz en SQL hay que usar `(col AT TIME ZONE 'UTC') AT TIME ZONE 'America/La_Paz'` (helper `laPazWall` en `tz-sql.js`); `col AT TIME ZONE 'America/La_Paz'` solo suma 4 h y manda los turnos de la tarde/noche al día siguiente.
 
 Los envíos pasan por una cola en memoria (≥ 8 s entre mensajes, 1 reintento) y nunca demoran las respuestas HTTP. Los resúmenes quedan marcados en la tabla `notification_log (kind, ref_date)`: un reinicio no duplica, y si el servidor estuvo caído a la hora programada se envía al volver (mismo día). Si falla, se reintenta cada 10 min (máx. 3 intentos).
 
@@ -127,7 +131,8 @@ Los envíos pasan por una cola en memoria (≥ 8 s entre mensajes, 1 reintento) 
 
 - `server.js` — API + migración de `phone` + índices + redondeo
 - `notifier.js` — envío WhatsApp (Evolution API v2; alternativas CallMeBot / TextMeBot) con cola y reintento
-- `whatsapp-reports.js` — alertas en tiempo real + resúmenes programados (`notification_log`)
+- `whatsapp-reports.js` — alertas en tiempo real + aviso 20:00 + resúmenes programados (`notification_log`)
+- `tz-sql.js` — conversión UTC → La Paz en SQL (`start_time`/`end_time` son `TIMESTAMP` sin zona en UTC)
 - `index.html` — UI PWA
 - `sw.js` — cache v8 + notificaciones por mensaje
 - `manifest.json` — metadatos PWA
