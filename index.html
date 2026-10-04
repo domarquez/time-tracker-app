@@ -735,9 +735,9 @@
             const el = document.getElementById('night-modal');
             const msg = document.getElementById('night-modal-msg');
             if (msg) {
-                msg.textContent = message || (phase === '23'
-                    ? 'Son las 23:00. ¿Seguís hasta medianoche o apagamos?'
-                    : 'Pasaron las 20:00 y el turno sigue abierto. ¿Seguís contando horas?');
+                msg.textContent = message || (phase === '20'
+                    ? 'Pasaron las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
+                    : 'El turno sigue abierto. ¿Seguís trabajando o apagamos?');
             }
             if (el) el.classList.remove('hidden');
             nightModalVisible = true;
@@ -765,9 +765,7 @@
                 if (lastNightNotifyKey !== notifyKey) {
                     lastNightNotifyKey = notifyKey;
                     await showLocalNotification(
-                        night.phase === '23'
-                            ? '🌙 23:00 — ¿Seguís hasta medianoche?'
-                            : '🌙 Turno abierto — ¿Seguís?',
+                        '🌙 Turno abierto — ¿Seguís?',
                         night.message || 'Respondé Seguir o Apagar. Sin respuesta se corta solo.',
                         `night-ask-${night.phase}`
                     );
@@ -812,9 +810,9 @@
                 return alert(GPS_REQUIRED_MSG);
             }
             const phase = nightAskPhase || '20';
-            const observation = phase === '23'
-                ? 'Apagado por el usuario a las 23h'
-                : 'Apagado por el usuario (noche, no seguir)';
+            const observation = phase === '20'
+                ? 'Apagado por el usuario (noche, no seguir)'
+                : 'Apagado por el usuario en el chequeo nocturno';
             try {
                 const res = await fetch('/stop', {
                     method: 'POST',
@@ -893,8 +891,8 @@
                 }
             }
 
-            // Chequeo nocturno 20:00 / 23:00 / medianoche (servidor autoritativo)
-            if (currentEntryId || hour >= 20 || hour < 1) {
+            // Chequeo nocturno 20:00 / 23:00 / cada hora, también pasada la medianoche (servidor autoritativo)
+            if (currentEntryId || hour >= 20 || hour < 8) {
                 await pollNightCheck();
             }
         }

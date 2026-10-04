@@ -6,7 +6,7 @@ const bodyParser = require('body-parser');
 require('dotenv').config();
 const notifier = require('./notifier');
 const { createWhatsappReports } = require('./whatsapp-reports');
-const { laPazDate, entryDay } = require('./tz-sql');
+const { laPazWall, entryDay } = require('./tz-sql');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -307,24 +307,11 @@ async function handleAuth(req, res) {
 }
 
 
-/** Current clock parts in America/La_Paz */
-async function getLaPazClock() {
-  const r = await pool.query(
-    `SELECT
-       (NOW() AT TIME ZONE $1)::date::text AS today,
-       EXTRACT(HOUR FROM (NOW() AT TIME ZONE $1))::int AS hour,
-       EXTRACT(MINUTE FROM (NOW() AT TIME ZONE $1))::int AS minute,
-       NOW() AS now_utc`,
-    [TZ]
-  );
-  return r.rows[0];
-}
-
 /**
  * Close an open entry without GPS (server auto-stop / cron).
  * Rounding rules unchanged. end lat/lng stay null.
  */
-async function closeEntryAuto(row, { stop_reason, observation, endAt } = {}) {
+async function closeEntryAuto(row, { stop_reason, observation, endAt, phase } = {}) {
   const endTime = endAt ? new Date(endAt) : new Date();
   const startTime = new Date(row.start_time);
   const rawMinutes = Math.max(0, Math.floor((endTime - startTime) / (1000 * 60)));
@@ -350,7 +337,7 @@ async function closeEntryAuto(row, { stop_reason, observation, endAt } = {}) {
   if (upd.rows.length) {
     const weekStart = await getWeekStartLaPaz(startTime.toISOString());
     await updateWeeklySummary(row.user_id, weekStart, minutes);
-    whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes });
+    whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes, entryId: row.id, endAt: endTime });
   }
 
   const fmt = formatHours(minutes);
@@ -365,20 +352,77 @@ async function closeEntryAuto(row, { stop_reason, observation, endAt } = {}) {
     message: buildStopMessage(detail),
     observation: obs,
     stop_reason: reason,
-    phase: 'midnight_closed'
+    phase: phase || 'auto_closed'
   };
 }
 
-/** End timestamp for "midnight La Paz after start date" (for cut at 00:00). */
-async function midnightAfterStartLaPaz(startTime) {
+/**
+ * Política nocturna (America/La_Paz). Los turnos PUEDEN pasar la medianoche:
+ * no hay corte fijo a las 00:00, pero el trabajador tiene que ir confirmando.
+ *
+ * Checkpoints, en horas desde la medianoche del día de INICIO del turno:
+ *   20 (20:00), 23 (23:00), 24 (00:00 del día siguiente), 25 (01:00), …
+ * cada NIGHT_ASK_EVERY_MIN minutos después de las 23:00 (default 60).
+ * Solo cuentan los checkpoints posteriores al inicio del turno.
+ * - En cada checkpoint se pregunta "¿Seguís?" (night_ask_phase = checkpoint).
+ * - Sin respuesta en NIGHT_ASK_TIMEOUT_MIN (default 15) → corte automático con observación.
+ * - "Seguir" (/night-continue) → night_acked_phase = checkpoint; no se vuelve a
+ *   preguntar hasta el siguiente.
+ * - Tope de seguridad: MAX_SHIFT_HOURS (default 16) → corte automático al llegar
+ *   a ese largo (end_time = inicio + tope; no se acreditan minutos de más).
+ * Todas las horas del turno cuentan para el día en que EMPEZÓ (columna date).
+ */
+function envNum(name, fallback, min) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+function nightConfig() {
+  return {
+    everyMin: envNum('NIGHT_ASK_EVERY_MIN', 60, 15),
+    timeoutMin: envNum('NIGHT_ASK_TIMEOUT_MIN', 15, 1),
+    maxShiftMin: Math.round(envNum('MAX_SHIFT_HOURS', 16, 1) * 60)
+  };
+}
+
+/** Minuto (desde la medianoche del día de inicio) de cada checkpoint, ordenados. */
+function nightCheckpoints(maxMin, everyMin) {
+  const cps = [20 * 60, 23 * 60];
+  for (let m = 23 * 60 + everyMin; m <= maxMin; m += everyMin) cps.push(m);
+  return cps;
+}
+
+/** Código de fase = minutos desde la medianoche del día de inicio / 60 ("20", "23", "24", "25"…; "24.5" si every=30). */
+const phaseOf = (min) => String(min / 60);
+const minOfPhase = (phase) => {
+  const n = Number(phase);
+  return Number.isFinite(n) ? Math.round(n * 60) : null;
+};
+/** HH:MM La Paz de un checkpoint (24 → 00:00). */
+function cpLabel(min) {
+  const m = ((min % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+function askMessage(cpMin) {
+  if (cpMin === 20 * 60) return 'Son más de las 20:00 y el turno sigue abierto. ¿Seguís contando horas?';
+  const dia = cpMin >= 1440 ? ' (ya es el día siguiente; las horas cuentan para el día en que prendiste)' : '';
+  return `Son las ${cpLabel(cpMin)} y el turno sigue abierto${dia}. ¿Seguís trabajando?`;
+}
+
+/** Estado del turno en minutos desde la medianoche La Paz de su día de inicio. */
+async function shiftClock(entryId, now = new Date()) {
   const r = await pool.query(
-    `SELECT (
-       (( $1::timestamptz AT TIME ZONE $2)::date + INTERVAL '1 day')
-       AT TIME ZONE $2
-     ) AS midnight`,
-    [startTime, TZ]
+    `SELECT te.id, te.user_id, te.start_time,
+            ${entryDay('te')}::text AS start_date,
+            to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm,
+            FLOOR(EXTRACT(EPOCH FROM (${laPazWall('te.start_time')} - ${entryDay('te')}::timestamp)) / 60)::int AS start_min,
+            FLOOR(EXTRACT(EPOCH FROM (($3::timestamptz AT TIME ZONE $2) - ${entryDay('te')}::timestamp)) / 60)::int AS now_min,
+            te.night_acked_phase, te.night_ask_phase, te.night_ask_at,
+            EXTRACT(EPOCH FROM ($3::timestamptz - te.night_ask_at)) AS ask_age_sec
+     FROM time_entries te WHERE te.id = $1 AND te.end_time IS NULL`,
+    [entryId, TZ, now.toISOString()]
   );
-  return r.rows[0].midnight;
+  return r.rows[0] || null;
 }
 
 /**
@@ -386,146 +430,71 @@ async function midnightAfterStartLaPaz(startTime) {
  * Returns { action: 'none'|'ask'|'auto_stopped', phase?, ask_continue?, ... }
  */
 async function evaluateNightForEntry(row) {
-  const clock = await getLaPazClock();
-  const startDateRes = await pool.query(
-    `SELECT ${laPazDate('start_time')}::text AS start_date,
-            night_acked_phase, night_ask_at, night_ask_phase,
-            EXTRACT(EPOCH FROM (NOW() - night_ask_at)) AS ask_age_sec
-     FROM time_entries WHERE id = $1`,
-    [row.id]
-  );
-  const meta = startDateRes.rows[0];
-  const startDate = meta.start_date;
-  const today = clock.today;
-  // Normalize date compare (pg may return Date or string)
-  const startDateStr = String(startDate).slice(0, 10);
-  const todayStr = String(today).slice(0, 10);
+  const now = new Date();
+  const s = await shiftClock(row.id, now);
+  if (!s) return { action: 'none', ask_continue: false, phase: null };
+  const cfg = nightConfig();
+  const startMin = Number(s.start_min);
+  const nowMin = Number(s.now_min);
+  const elapsed = nowMin - startMin;
 
-  // Past midnight relative to start day → always auto-stop at that midnight
-  if (startDateStr < todayStr) {
-    const midnight = await midnightAfterStartLaPaz(row.start_time);
-    const closed = await closeEntryAuto(row, {
-      stop_reason: 'medianoche',
-      observation: 'Corte automático a medianoche',
-      endAt: midnight
+  // Tope de seguridad: largo máximo del turno
+  if (elapsed >= cfg.maxShiftMin) {
+    const endAt = new Date(new Date(s.start_time).getTime() + cfg.maxShiftMin * 60000);
+    const closed = await closeEntryAuto(s, {
+      stop_reason: 'tope_turno',
+      observation: `Corte automático: tope de ${formatHours(cfg.maxShiftMin).hours.replace(/\.0$/, '')} h de turno`,
+      endAt,
+      phase: 'max_shift'
     });
-    return {
-      action: 'auto_stopped',
-      ask_continue: false,
-      phase: 'midnight_closed',
-      ...closed
-    };
+    return { action: 'auto_stopped', ask_continue: false, ...closed };
   }
 
-  const hour = Number(clock.hour);
-  const minute = Number(clock.minute);
-  const acked = meta.night_acked_phase || null;
-  const askPhase = meta.night_ask_phase || null;
-  const askAgeSec = meta.ask_age_sec != null ? Number(meta.ask_age_sec) : null;
-  const ASK_TIMEOUT_SEC = 15 * 60;
+  const acked = minOfPhase(s.night_acked_phase);
+  const askMin = minOfPhase(s.night_ask_phase);
+  const askAgeSec = s.ask_age_sec != null ? Number(s.ask_age_sec) : null;
 
-  // Before 20:00 — no night checks
-  if (hour < 20) {
-    return { action: 'none', ask_continue: false, phase: null };
-  }
-
-  // --- 23:00 milestone ---
-  if (hour >= 23) {
-    if (acked === '23') {
-      return { action: 'none', ask_continue: false, phase: null };
-    }
-
-    // Pregunta de las 20h vencida sin responder → cortar (no reiniciar reloj a las 23)
-    if (askPhase === '20' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
-      const closed = await closeEntryAuto(row, {
-        stop_reason: 'sin_respuesta_noche',
-        observation: 'Corte automático: sin respuesta a las 20h'
-      });
-      return {
-        action: 'auto_stopped',
-        ask_continue: false,
-        phase: '20',
-        ...closed
-      };
-    }
-
-    // Pending 23 ask timed out → auto-stop
-    if (askPhase === '23' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
-      const closed = await closeEntryAuto(row, {
-        stop_reason: 'sin_respuesta_noche',
-        observation: 'Corte automático: sin respuesta a las 23h'
-      });
-      return {
-        action: 'auto_stopped',
-        ask_continue: false,
-        phase: '23',
-        ...closed
-      };
-    }
-
-    // Issue or keep 23 ask
-    if (askPhase !== '23') {
-      await pool.query(
-        `UPDATE time_entries
-         SET night_ask_at = NOW(), night_ask_phase = '23'
-         WHERE id = $1 AND end_time IS NULL`,
-        [row.id]
-      );
-    }
-    return {
-      action: 'ask',
-      ask_continue: true,
-      phase: '23',
-      entry_id: row.id,
-      message: 'Son las 23:00. ¿Seguís hasta medianoche o apagamos el turno?'
-    };
-  }
-
-  // --- 20:00–22:59: every-15-min ask until Seguir or timeout ---
-  if (acked === '20' || acked === '23') {
-    return { action: 'none', ask_continue: false, phase: null };
-  }
-
-  if (askPhase === '20' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
-    const closed = await closeEntryAuto(row, {
+  // Pregunta pendiente vencida sin respuesta → cortar
+  if (askMin != null && askAgeSec != null && askAgeSec >= cfg.timeoutMin * 60
+      && (acked == null || acked < askMin)) {
+    const closed = await closeEntryAuto(s, {
       stop_reason: 'sin_respuesta_noche',
-      observation: 'Corte automático: sin respuesta a las 20h'
+      observation: `Corte automático: sin respuesta a las ${cpLabel(askMin)}`,
+      // Se corta al vencer la espera (no se acreditan horas sin confirmar si el cron se atrasó)
+      endAt: new Date(Math.min(now.getTime(), new Date(s.night_ask_at).getTime() + cfg.timeoutMin * 60000)),
+      phase: s.night_ask_phase
     });
-    return {
-      action: 'auto_stopped',
-      ask_continue: false,
-      phase: '20',
-      ...closed
-    };
+    return { action: 'auto_stopped', ask_continue: false, ...closed };
   }
 
-  if (askPhase === '20' && askAgeSec != null && askAgeSec < ASK_TIMEOUT_SEC) {
-    return {
-      action: 'ask',
-      ask_continue: true,
-      phase: '20',
-      entry_id: row.id,
-      message: 'Son más de las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
-    };
+  // Último checkpoint ya alcanzado y posterior al inicio del turno
+  const due = nightCheckpoints(startMin + cfg.maxShiftMin, cfg.everyMin)
+    .filter((m) => m > startMin && m <= nowMin);
+  const current = due.length ? due[due.length - 1] : null;
+  if (current == null || (acked != null && acked >= current)) {
+    return { action: 'none', ask_continue: false, phase: null };
   }
 
-  // New ask window (first at/after 20:00, or after a cleared ask)
-  await pool.query(
-    `UPDATE time_entries
-     SET night_ask_at = NOW(), night_ask_phase = '20'
-     WHERE id = $1 AND end_time IS NULL`,
-    [row.id]
-  );
+  const phase = phaseOf(current);
+  if (askMin !== current) {
+    await pool.query(
+      `UPDATE time_entries
+       SET night_ask_at = $3, night_ask_phase = $2
+       WHERE id = $1 AND end_time IS NULL`,
+      [s.id, phase, now.toISOString()]
+    );
+    whatsapp.alertAsk(s.id, phase);
+  }
   return {
     action: 'ask',
     ask_continue: true,
-    phase: '20',
-    entry_id: row.id,
-    message: 'Son más de las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
+    phase,
+    entry_id: s.id,
+    message: askMessage(current)
   };
 }
 
-/** Cron: close overdue open shifts (midnight / unanswered night asks). */
+/** Cron: cortes por pregunta nocturna sin respuesta / tope de turno. */
 async function runNightCron() {
   try {
     const open = await pool.query(
@@ -594,12 +563,14 @@ app.post('/start', async (req, res) => {
       });
     }
 
-    const today = await getTodayLaPaz();
+    // Turno nuevo siempre separado: su día es la fecha La Paz en que se prende
+    const startAt = new Date();
+    const today = whatsapp.laPazParts(startAt).date;
     const result = await pool.query(
       `INSERT INTO time_entries (user_id, start_time, date, latitude, longitude)
-       VALUES ($1, NOW() AT TIME ZONE 'UTC', $2, $3, $4)
+       VALUES ($1, $5, $2::date, $3, $4)
        RETURNING id, start_time`,
-      [user_id, today, latitude || null, longitude || null]
+      [user_id, today, latitude || null, longitude || null, startAt.toISOString()]
     );
 
     if (latitude != null || longitude != null) {
@@ -614,7 +585,7 @@ app.post('/start', async (req, res) => {
       entry_id: result.rows[0].id,
       start_time: result.rows[0].start_time
     });
-    whatsapp.alertStart(user_id, new Date());
+    whatsapp.alertStart(user_id, startAt);
   } catch (e) {
     if (e.code === '23505') {
       return res.status(409).json({ error: 'Ya hay un turno abierto' });
@@ -673,7 +644,7 @@ app.post('/stop', async (req, res) => {
 
     const upd = await pool.query(
       `UPDATE time_entries
-       SET end_time = NOW() AT TIME ZONE 'UTC',
+       SET end_time = $7,
            duration_minutes = $1,
            end_latitude = $2,
            end_longitude = $3,
@@ -683,7 +654,8 @@ app.post('/stop', async (req, res) => {
            night_ask_phase = NULL
        WHERE id = $6 AND end_time IS NULL
        RETURNING id`,
-      [minutes, isAuto ? null : (latitude ?? null), isAuto ? null : (longitude ?? null), obs, reason, row.id]
+      [minutes, isAuto ? null : (latitude ?? null), isAuto ? null : (longitude ?? null), obs, reason, row.id,
+        endTime.toISOString()]
     );
     // Otro proceso (cron nocturno / doble click) ya lo cerró: no sumar dos veces
     if (!upd.rows.length) {
@@ -715,7 +687,7 @@ app.post('/stop', async (req, res) => {
       end_longitude: isAuto ? null : (longitude ?? null)
     });
     if (isAuto) {
-      whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes });
+      whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes, entryId: row.id, endAt: endTime });
     } else {
       whatsapp.alertStop(row.user_id, minutes, endTime);
     }
@@ -765,44 +737,39 @@ app.post('/auto-stop', async (req, res) => {
 app.post('/night-continue', async (req, res) => {
   const { user_id, entry_id, phase } = req.body;
   const p = String(phase || '');
-  if (p !== '20' && p !== '23') {
-    return res.status(400).json({ error: 'phase debe ser 20 o 23' });
+  const pMin = minOfPhase(p);
+  if (!p || pMin == null || pMin < 20 * 60) {
+    return res.status(400).json({ error: 'phase inválida (20, 23, 24, 25…)' });
   }
   if (!user_id && !entry_id) {
     return res.status(400).json({ error: 'user_id o entry_id requerido' });
   }
   try {
-    let q;
-    let params;
-    if (entry_id) {
-      q = `UPDATE time_entries
-           SET night_acked_phase = $1,
-               night_ask_at = NULL,
-               night_ask_phase = NULL
-           WHERE id = $2 AND end_time IS NULL
-           RETURNING id, user_id, night_acked_phase`;
-      params = [p, entry_id];
-    } else {
-      q = `UPDATE time_entries
-           SET night_acked_phase = $1,
-               night_ask_at = NULL,
-               night_ask_phase = NULL
-           WHERE user_id = $2 AND end_time IS NULL
-           RETURNING id, user_id, night_acked_phase`;
-      params = [p, user_id];
-    }
-    const result = await pool.query(q, params);
+    // No permitir "Seguir" para un checkpoint anterior al ya confirmado
+    const result = await pool.query(
+      `UPDATE time_entries
+       SET night_acked_phase = $1,
+           night_ask_at = NULL,
+           night_ask_phase = NULL
+       WHERE ${entry_id ? 'id' : 'user_id'} = $2 AND end_time IS NULL
+         AND (night_acked_phase IS NULL OR night_acked_phase !~ '^[0-9.]+$'
+              OR night_acked_phase::numeric <= $1::numeric)
+       RETURNING id, user_id, night_acked_phase`,
+      [p, entry_id || user_id]
+    );
     if (!result.rows.length) {
       return res.status(404).json({ error: 'No hay turno abierto' });
     }
+    const cfg = nightConfig();
+    const next = nightCheckpoints(pMin + cfg.everyMin * 2, cfg.everyMin).find((m) => m > pMin);
     res.json({
       success: true,
       entry_id: result.rows[0].id,
       night_acked_phase: result.rows[0].night_acked_phase,
-      message: p === '23'
-        ? 'Seguís hasta medianoche. A las 00:00 se apaga solo.'
-        : 'Seguís contando. Te avisamos de nuevo a las 23:00.'
+      message: `Seguís contando. Te preguntamos de nuevo a las ${cpLabel(next)}. `
+        + 'Todas las horas cuentan para el día en que prendiste.'
     });
+    whatsapp.alertContinue(result.rows[0].id, p);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -851,7 +818,7 @@ app.get('/active/:user_id', async (req, res) => {
         night: {
           action: 'auto_stopped',
           ask_continue: false,
-          phase: night.phase || 'midnight_closed',
+          phase: night.phase || 'auto_closed',
           observation: night.observation,
           stop_reason: night.stop_reason,
           duration_minutes: night.duration_minutes,
@@ -907,7 +874,7 @@ app.get('/night-check/:user_id', async (req, res) => {
       return res.json({
         active: false,
         ask_continue: false,
-        phase: night.phase || 'midnight_closed',
+        phase: night.phase || 'auto_closed',
         action: 'auto_stopped',
         observation: night.observation,
         stop_reason: night.stop_reason,
