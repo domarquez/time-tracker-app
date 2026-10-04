@@ -141,6 +141,15 @@ async function initDB() {
     ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS end_longitude DOUBLE PRECISION;
   `);
 
+  // Observación / motivo de corte + acuse nocturno
+  await pool.query(`
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS observation TEXT;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS night_acked_phase TEXT;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS night_ask_at TIMESTAMPTZ;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS night_ask_phase TEXT;
+  `);
+
   // Unique index on phone (allows multiple NULLs in Postgres)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users (phone) WHERE phone IS NOT NULL;
@@ -269,6 +278,238 @@ async function handleAuth(req, res) {
   }
 }
 
+
+/** Current clock parts in America/La_Paz */
+async function getLaPazClock() {
+  const r = await pool.query(
+    `SELECT
+       (NOW() AT TIME ZONE $1)::date AS today,
+       EXTRACT(HOUR FROM (NOW() AT TIME ZONE $1))::int AS hour,
+       EXTRACT(MINUTE FROM (NOW() AT TIME ZONE $1))::int AS minute,
+       NOW() AS now_utc`,
+    [TZ]
+  );
+  return r.rows[0];
+}
+
+/**
+ * Close an open entry without GPS (server auto-stop / cron).
+ * Rounding rules unchanged. end lat/lng stay null.
+ */
+async function closeEntryAuto(row, { stop_reason, observation, endAt } = {}) {
+  const endTime = endAt ? new Date(endAt) : new Date();
+  const startTime = new Date(row.start_time);
+  const rawMinutes = Math.max(0, Math.floor((endTime - startTime) / (1000 * 60)));
+  const detail = roundingDetail(rawMinutes);
+  const minutes = detail.rounded;
+  const obs = observation || null;
+  const reason = stop_reason || 'auto';
+
+  const upd = await pool.query(
+    `UPDATE time_entries
+     SET end_time = $1,
+         duration_minutes = $2,
+         observation = COALESCE($3, observation),
+         stop_reason = COALESCE($4, stop_reason),
+         night_ask_at = NULL,
+         night_ask_phase = NULL
+     WHERE id = $5 AND end_time IS NULL
+     RETURNING id`,
+    [endTime.toISOString(), minutes, obs, reason, row.id]
+  );
+
+  // Si otro proceso ya cerró el turno, no sumar de nuevo al semanal
+  if (upd.rows.length) {
+    const weekStart = await getWeekStartLaPaz(startTime.toISOString());
+    await updateWeeklySummary(row.user_id, weekStart, minutes);
+  }
+
+  const fmt = formatHours(minutes);
+  return {
+    success: true,
+    auto: true,
+    entry_id: row.id,
+    user_id: row.user_id,
+    raw_minutes: detail.raw,
+    duration_minutes: minutes,
+    duration_hours: fmt.hours,
+    message: buildStopMessage(detail),
+    observation: obs,
+    stop_reason: reason,
+    phase: 'midnight_closed'
+  };
+}
+
+/** End timestamp for "midnight La Paz after start date" (for cut at 00:00). */
+async function midnightAfterStartLaPaz(startTime) {
+  const r = await pool.query(
+    `SELECT (
+       (( $1::timestamptz AT TIME ZONE $2)::date + INTERVAL '1 day')
+       AT TIME ZONE $2
+     ) AS midnight`,
+    [startTime, TZ]
+  );
+  return r.rows[0].midnight;
+}
+
+/**
+ * Evaluate night policy for one open entry.
+ * Returns { action: 'none'|'ask'|'auto_stopped', phase?, ask_continue?, ... }
+ */
+async function evaluateNightForEntry(row) {
+  const clock = await getLaPazClock();
+  const startDateRes = await pool.query(
+    `SELECT (start_time AT TIME ZONE $2)::date AS start_date,
+            night_acked_phase, night_ask_at, night_ask_phase,
+            EXTRACT(EPOCH FROM (NOW() - night_ask_at)) AS ask_age_sec
+     FROM time_entries WHERE id = $1`,
+    [row.id, TZ]
+  );
+  const meta = startDateRes.rows[0];
+  const startDate = meta.start_date;
+  const today = clock.today;
+  // Normalize date compare (pg may return Date or string)
+  const startDateStr = String(startDate).slice(0, 10);
+  const todayStr = String(today).slice(0, 10);
+
+  // Past midnight relative to start day → always auto-stop at that midnight
+  if (startDateStr < todayStr) {
+    const midnight = await midnightAfterStartLaPaz(row.start_time);
+    const closed = await closeEntryAuto(row, {
+      stop_reason: 'medianoche',
+      observation: 'Corte automático a medianoche',
+      endAt: midnight
+    });
+    return {
+      action: 'auto_stopped',
+      ask_continue: false,
+      phase: 'midnight_closed',
+      ...closed
+    };
+  }
+
+  const hour = Number(clock.hour);
+  const minute = Number(clock.minute);
+  const acked = meta.night_acked_phase || null;
+  const askPhase = meta.night_ask_phase || null;
+  const askAgeSec = meta.ask_age_sec != null ? Number(meta.ask_age_sec) : null;
+  const ASK_TIMEOUT_SEC = 15 * 60;
+
+  // Before 20:00 — no night checks
+  if (hour < 20) {
+    return { action: 'none', ask_continue: false, phase: null };
+  }
+
+  // --- 23:00 milestone ---
+  if (hour >= 23) {
+    if (acked === '23') {
+      return { action: 'none', ask_continue: false, phase: null };
+    }
+
+    // Pregunta de las 20h vencida sin responder → cortar (no reiniciar reloj a las 23)
+    if (askPhase === '20' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
+      const closed = await closeEntryAuto(row, {
+        stop_reason: 'sin_respuesta_noche',
+        observation: 'Corte automático: sin respuesta a las 20h'
+      });
+      return {
+        action: 'auto_stopped',
+        ask_continue: false,
+        phase: '20',
+        ...closed
+      };
+    }
+
+    // Pending 23 ask timed out → auto-stop
+    if (askPhase === '23' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
+      const closed = await closeEntryAuto(row, {
+        stop_reason: 'sin_respuesta_noche',
+        observation: 'Corte automático: sin respuesta a las 23h'
+      });
+      return {
+        action: 'auto_stopped',
+        ask_continue: false,
+        phase: '23',
+        ...closed
+      };
+    }
+
+    // Issue or keep 23 ask
+    if (askPhase !== '23') {
+      await pool.query(
+        `UPDATE time_entries
+         SET night_ask_at = NOW(), night_ask_phase = '23'
+         WHERE id = $1 AND end_time IS NULL`,
+        [row.id]
+      );
+    }
+    return {
+      action: 'ask',
+      ask_continue: true,
+      phase: '23',
+      entry_id: row.id,
+      message: 'Son las 23:00. ¿Seguís hasta medianoche o apagamos el turno?'
+    };
+  }
+
+  // --- 20:00–22:59: every-15-min ask until Seguir or timeout ---
+  if (acked === '20' || acked === '23') {
+    return { action: 'none', ask_continue: false, phase: null };
+  }
+
+  if (askPhase === '20' && askAgeSec != null && askAgeSec >= ASK_TIMEOUT_SEC) {
+    const closed = await closeEntryAuto(row, {
+      stop_reason: 'sin_respuesta_noche',
+      observation: 'Corte automático: sin respuesta a las 20h'
+    });
+    return {
+      action: 'auto_stopped',
+      ask_continue: false,
+      phase: '20',
+      ...closed
+    };
+  }
+
+  if (askPhase === '20' && askAgeSec != null && askAgeSec < ASK_TIMEOUT_SEC) {
+    return {
+      action: 'ask',
+      ask_continue: true,
+      phase: '20',
+      entry_id: row.id,
+      message: 'Son más de las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
+    };
+  }
+
+  // New ask window (first at/after 20:00, or after a cleared ask)
+  await pool.query(
+    `UPDATE time_entries
+     SET night_ask_at = NOW(), night_ask_phase = '20'
+     WHERE id = $1 AND end_time IS NULL`,
+    [row.id]
+  );
+  return {
+    action: 'ask',
+    ask_continue: true,
+    phase: '20',
+    entry_id: row.id,
+    message: 'Son más de las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
+  };
+}
+
+/** Cron: close overdue open shifts (midnight / unanswered night asks). */
+async function runNightCron() {
+  try {
+    const open = await pool.query(
+      `SELECT id, user_id, start_time FROM time_entries WHERE end_time IS NULL`
+    );
+    for (const row of open.rows) {
+      await evaluateNightForEntry(row);
+    }
+  } catch (e) {
+    console.error('night cron:', e.message);
+  }
+}
+
 app.post('/register', handleAuth);
 app.post('/login', handleAuth);
 
@@ -353,8 +594,20 @@ app.post('/start', async (req, res) => {
 });
 
 app.post('/stop', async (req, res) => {
-  const { entry_id, user_id, latitude, longitude } = req.body;
-  if (latitude == null || longitude == null || latitude === '' || longitude === '') {
+  const {
+    entry_id,
+    user_id,
+    latitude,
+    longitude,
+    observation,
+    stop_reason,
+    auto
+  } = req.body;
+  const isAuto = auto === true || auto === 'true' || stop_reason === 'sin_respuesta_noche'
+    || stop_reason === 'medianoche';
+
+  // GPS obligatorio solo en apagado iniciado por el usuario
+  if (!isAuto && (latitude == null || longitude == null || latitude === '' || longitude === '')) {
     return res.status(400).json({
       error: 'Tenés que activar la ubicación (GPS) para registrar el turno.'
     });
@@ -385,18 +638,24 @@ app.post('/stop', async (req, res) => {
     const rawMinutes = Math.floor((endTime - startTime) / (1000 * 60));
     const detail = roundingDetail(rawMinutes);
     const minutes = detail.rounded;
+    const reason = stop_reason || (isAuto ? 'auto' : 'manual');
+    const obs = observation || null;
 
     await pool.query(
       `UPDATE time_entries
        SET end_time = NOW(),
            duration_minutes = $1,
            end_latitude = $2,
-           end_longitude = $3
-       WHERE id = $4`,
-      [minutes, latitude ?? null, longitude ?? null, row.id]
+           end_longitude = $3,
+           observation = COALESCE($4, observation),
+           stop_reason = $5,
+           night_ask_at = NULL,
+           night_ask_phase = NULL
+       WHERE id = $6`,
+      [minutes, isAuto ? null : (latitude ?? null), isAuto ? null : (longitude ?? null), obs, reason, row.id]
     );
 
-    if (latitude != null || longitude != null) {
+    if (!isAuto && (latitude != null || longitude != null)) {
       await pool.query(
         `UPDATE users SET latitude = COALESCE($1, latitude), longitude = COALESCE($2, longitude) WHERE id = $3`,
         [latitude, longitude, row.user_id]
@@ -409,13 +668,100 @@ app.post('/stop', async (req, res) => {
     const fmt = formatHours(minutes);
     res.json({
       success: true,
+      auto: !!isAuto,
       raw_minutes: detail.raw,
       duration_minutes: minutes,
       duration_hours: fmt.hours,
       message: buildStopMessage(detail),
       entry_id: row.id,
-      end_latitude: latitude ?? null,
-      end_longitude: longitude ?? null
+      observation: obs,
+      stop_reason: reason,
+      end_latitude: isAuto ? null : (latitude ?? null),
+      end_longitude: isAuto ? null : (longitude ?? null)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Auto-stop sin GPS (cliente o admin). Usa las mismas reglas de redondeo.
+ * Body: { entry_id? , user_id?, observation?, stop_reason? }
+ */
+app.post('/auto-stop', async (req, res) => {
+  const { entry_id, user_id, observation, stop_reason } = req.body;
+  try {
+    let entry;
+    if (entry_id) {
+      entry = await pool.query(
+        'SELECT id, user_id, start_time FROM time_entries WHERE id = $1 AND end_time IS NULL',
+        [entry_id]
+      );
+    } else if (user_id) {
+      entry = await pool.query(
+        'SELECT id, user_id, start_time FROM time_entries WHERE user_id = $1 AND end_time IS NULL ORDER BY start_time DESC LIMIT 1',
+        [user_id]
+      );
+    } else {
+      return res.status(400).json({ error: 'entry_id o user_id requerido' });
+    }
+    if (!entry.rows.length) {
+      return res.status(404).json({ error: 'No hay turno abierto' });
+    }
+    const closed = await closeEntryAuto(entry.rows[0], {
+      stop_reason: stop_reason || 'sin_respuesta_noche',
+      observation: observation || 'Corte automático: sin respuesta a las 20h'
+    });
+    res.json(closed);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Usuario responde "Seguir" al chequeo nocturno (fase 20 o 23).
+ * Body: { user_id, entry_id?, phase: '20'|'23' }
+ */
+app.post('/night-continue', async (req, res) => {
+  const { user_id, entry_id, phase } = req.body;
+  const p = String(phase || '');
+  if (p !== '20' && p !== '23') {
+    return res.status(400).json({ error: 'phase debe ser 20 o 23' });
+  }
+  if (!user_id && !entry_id) {
+    return res.status(400).json({ error: 'user_id o entry_id requerido' });
+  }
+  try {
+    let q;
+    let params;
+    if (entry_id) {
+      q = `UPDATE time_entries
+           SET night_acked_phase = $1,
+               night_ask_at = NULL,
+               night_ask_phase = NULL
+           WHERE id = $2 AND end_time IS NULL
+           RETURNING id, user_id, night_acked_phase`;
+      params = [p, entry_id];
+    } else {
+      q = `UPDATE time_entries
+           SET night_acked_phase = $1,
+               night_ask_at = NULL,
+               night_ask_phase = NULL
+           WHERE user_id = $2 AND end_time IS NULL
+           RETURNING id, user_id, night_acked_phase`;
+      params = [p, user_id];
+    }
+    const result = await pool.query(q, params);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'No hay turno abierto' });
+    }
+    res.json({
+      success: true,
+      entry_id: result.rows[0].id,
+      night_acked_phase: result.rows[0].night_acked_phase,
+      message: p === '23'
+        ? 'Seguís hasta medianoche. A las 00:00 se apaga solo.'
+        : 'Seguís contando. Te avisamos de nuevo a las 23:00.'
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -440,12 +786,12 @@ async function updateWeeklySummary(user_id, week_start, minutes) {
   }
 }
 
-/** Entrada abierta (timer persistente en servidor) */
+/** Entrada abierta (timer persistente en servidor) + chequeo nocturno */
 app.get('/active/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const result = await pool.query(
-      `SELECT id AS entry_id, start_time
+      `SELECT id, user_id, start_time, night_acked_phase, night_ask_at, night_ask_phase
        FROM time_entries
        WHERE user_id = $1 AND end_time IS NULL
        ORDER BY start_time DESC
@@ -453,13 +799,90 @@ app.get('/active/:user_id', async (req, res) => {
       [user_id]
     );
     if (!result.rows.length) {
-      return res.json({ active: null });
+      return res.json({ active: null, night: { action: 'none', ask_continue: false } });
     }
+
+    const row = result.rows[0];
+    const night = await evaluateNightForEntry(row);
+
+    if (night.action === 'auto_stopped') {
+      return res.json({
+        active: null,
+        night: {
+          action: 'auto_stopped',
+          ask_continue: false,
+          phase: night.phase || 'midnight_closed',
+          observation: night.observation,
+          stop_reason: night.stop_reason,
+          duration_minutes: night.duration_minutes,
+          duration_hours: night.duration_hours,
+          message: night.message
+        }
+      });
+    }
+
     res.json({
       active: {
-        entry_id: result.rows[0].entry_id,
-        start_time: result.rows[0].start_time
+        entry_id: row.id,
+        start_time: row.start_time,
+        night_acked_phase: row.night_acked_phase
+      },
+      night: {
+        action: night.action,
+        ask_continue: !!night.ask_continue,
+        phase: night.phase,
+        message: night.message || null
       }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Chequeo nocturno explícito (flags para modal / auto-corte).
+ * GET /night-check/:user_id → { ask_continue, phase, ... }
+ */
+app.get('/night-check/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT id, user_id, start_time, night_acked_phase, night_ask_at, night_ask_phase
+       FROM time_entries
+       WHERE user_id = $1 AND end_time IS NULL
+       ORDER BY start_time DESC
+       LIMIT 1`,
+      [user_id]
+    );
+    if (!result.rows.length) {
+      return res.json({
+        active: false,
+        ask_continue: false,
+        phase: null,
+        action: 'none'
+      });
+    }
+    const night = await evaluateNightForEntry(result.rows[0]);
+    if (night.action === 'auto_stopped') {
+      return res.json({
+        active: false,
+        ask_continue: false,
+        phase: night.phase || 'midnight_closed',
+        action: 'auto_stopped',
+        observation: night.observation,
+        stop_reason: night.stop_reason,
+        duration_minutes: night.duration_minutes,
+        duration_hours: night.duration_hours,
+        message: night.message
+      });
+    }
+    res.json({
+      active: true,
+      entry_id: result.rows[0].id,
+      ask_continue: !!night.ask_continue,
+      phase: night.phase,
+      action: night.action,
+      message: night.message || null
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -603,6 +1026,11 @@ app.get('/all-users', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Cron cada 60s: cortes nocturnos / medianoche aunque el cliente no pollee
+setInterval(runNightCron, 60 * 1000);
+// Primera pasada un poco después de arrancar (dar tiempo a initDB)
+setTimeout(runNightCron, 5000);
 
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);

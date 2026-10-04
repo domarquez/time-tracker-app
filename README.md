@@ -10,7 +10,12 @@ App simple (PWA) para registrar turnos continuos del personal. UI en español. Z
 - **Turno continuo**: un solo inicio/fin por jornada (sin corte de mediodía). Solo un turno abierto por usuario.
 - **Resúmenes**: HOY (“estuvo X horas”), SEMANA (lunes–sábado) y totales día a día. Tras **APAGAR**, confirmación de horas del turno.
 - **Redondeo a medias horas / horas** (ver abajo).
-- **Recordatorios** (Notification API + service worker): aviso para **prender** (~08:00) y **apagar** (~22:00) hora La Paz; mientras el turno está activo, avisos al cruzar >20 min (media hora) y >50 min (hora completa) en cada tramo de hora.
+- **Recordatorios** (Notification API + service worker): aviso para **prender** (~08:00) hora La Paz; mientras el turno está activo, avisos al cruzar >20 min (media hora) y >50 min (hora completa) en cada tramo de hora.
+- **Chequeo nocturno** (servidor autoritativo, America/La_Paz):
+  - Desde **20:00**: si el turno sigue abierto, pregunta cada ventana de **15 min** (notificación + modal Seguir/Apagar). Sin respuesta → corte automático con observación (`sin_respuesta_noche`).
+  - Si responde **Seguir**: deja de preguntar hasta las **23:00**.
+  - A las **23:00**: pregunta una vez más. Seguir → hasta medianoche; Apagar → cierra con observación; sin respuesta → corte automático.
+  - A las **00:00**: siempre corte automático (`Corte automático a medianoche`). GPS no requerido en auto-corte.
 - **Admin**: panel con lista de usuarios (incluye teléfono).
 - **Instalable** como PWA.
 
@@ -58,8 +63,11 @@ PORT=3000
 |--------|------|-------------|
 | POST | `/login` o `/register` | `{ phone, name? }` — alta/entrada por teléfono |
 | POST | `/start` | Abre turno (`user_id`) |
-| POST | `/stop` | Cierra turno (`entry_id` o `user_id`); responde `raw_minutes`, `duration_minutes` (redondeado) y `message` |
-| GET | `/active/:user_id` | Turno abierto o null |
+| POST | `/stop` | Cierra turno (`entry_id` o `user_id`); opcional `observation` / `stop_reason`; `auto: true` omite GPS |
+| POST | `/auto-stop` | Corte sin GPS (servidor/cliente) con observación |
+| POST | `/night-continue` | `{ user_id, entry_id?, phase: '20'\|'23' }` — Seguir en chequeo nocturno |
+| GET | `/active/:user_id` | Turno abierto + flags `night` (`ask_continue`, `phase`, `auto_stopped`) |
+| GET | `/night-check/:user_id` | Solo chequeo nocturno (`ask_continue`, `phase`, `midnight_closed`) |
 | GET | `/daily/:user_id` | Total de hoy (La Paz) |
 | GET | `/weekly/:user_id` | Total lun–sáb |
 | GET | `/week-days/:user_id` | Array `{ date, hours }` lun–sáb |
@@ -71,12 +79,13 @@ PORT=3000
 2. Abrir la app → ingresar teléfono + nombre (1ª vez) → ENTRAR.
 3. Recargar: debe seguir logueado; si hay turno abierto, el timer continúa y muestra “Acreditaría: X.X h”.
 4. PRENDER → esperar → APAGAR → ver banner/alert con horas acreditadas y explicación del redondeo; actualizar HOY/SEMANA.
-5. Concedir notificaciones; con la app abierta, los recordatorios se evalúan cada minuto (hora La Paz). Con turno activo, al pasar 21 y 51 min de cada hora deberían llegar avisos de media hora / hora completa.
+5. Conceder notificaciones; con la app abierta, los recordatorios se evalúan cada minuto (hora La Paz). Con turno activo, al pasar 21 y 51 min de cada hora deberían llegar avisos de media hora / hora completa.
+6. Chequeo nocturno: con turno abierto después de las 20:00 La Paz, debe aparecer el modal Seguir/Apagar y una notificación. Seguir silencia hasta 23:00; sin respuesta en 15 min (o cron del servidor) cierra con observación. A medianoche siempre corta.
 
 ## Estructura
 
 - `server.js` — API + migración de `phone` + índices + redondeo
 - `index.html` — UI PWA
-- `sw.js` — cache v4 + notificaciones por mensaje
+- `sw.js` — cache v8 + notificaciones por mensaje
 - `manifest.json` — metadatos PWA
 - `package.json` — dependencias
