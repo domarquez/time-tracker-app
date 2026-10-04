@@ -57,6 +57,32 @@ PORT=3000
 
 > Neon/Postgres suelen requerir SSL; el servidor usa `rejectUnauthorized: false` cuando hay `DATABASE_URL`.
 
+### WhatsApp al admin (CallMeBot)
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `CALLMEBOT_APIKEY` | — | Apikey de CallMeBot. **Sin apikey no se envía nada** (solo se loguea y se omite; nunca rompe). |
+| `ADMIN_WHATSAPP_PHONE` | `+59167827075` | Número del admin (formato internacional con `+`). |
+| `WHATSAPP_ENABLED` | `true` si hay apikey | `false` apaga todos los envíos. |
+| `WHATSAPP_PROVIDER` | `callmebot` | `textmebot` para usar TextMeBot (`TEXTMEBOT_APIKEY`). |
+| `TEXTMEBOT_APIKEY` | — | Solo si `WHATSAPP_PROVIDER=textmebot`. |
+| `WHATSAPP_REALTIME_ENABLED` | `true` | `false` = solo resúmenes (sin alertas de PRENDER/APAGAR/corte). |
+| `WHATSAPP_MIN_GAP_MS` | `8000` | Separación mínima entre mensajes (límite del plan gratuito). |
+| `DAILY_SUMMARY_TIME` | `21:30` | Hora (La Paz) del resumen diario, lunes a sábado. |
+| `WEEKLY_SUMMARY_TIME` | `21:45` | Hora (La Paz) del resumen semanal, sábado. |
+
+**Obtener la apikey:** agendar el número de CallMeBot (ver https://www.callmebot.com/blog/free-api-whatsapp-messages/), enviarle por WhatsApp *"I allow callmebot to send me messages"* desde el teléfono del admin y copiar la apikey que responde en `CALLMEBOT_APIKEY` (Railway → Variables).
+
+**Qué se envía** (hora America/La_Paz):
+
+- Tiempo real: `🟢 *Nombre* prendió a las HH:MM`, `🔴 *Nombre* apagó a las HH:MM — X.X h`, `⚠️ *Nombre*: corte automático (motivo) — X.X h` (20h/23h sin respuesta, medianoche).
+- **Resumen diario** lun–sáb 21:30: quién registró hoy (horas), quién no registró (usuarios con teléfono sin turno hoy) y quién no apagó.
+- **Resumen semanal** sábado 21:45: horas por trabajador lun–sáb + total, y observaciones (cortes automáticos).
+
+Los envíos pasan por una cola en memoria (≥ 8 s entre mensajes, 1 reintento) y nunca demoran las respuestas HTTP. Los resúmenes quedan marcados en la tabla `notification_log (kind, ref_date)`: un reinicio no duplica, y si el servidor estuvo caído a la hora programada se envía al volver (mismo día). Si falla, se reintenta cada 10 min (máx. 3 intentos).
+
+**Probar:** `POST /admin/test-whatsapp` con `{ "password": "admin" }` → envía `✅ Prueba de Control de Horas`. Vista previa de resúmenes (no marca `notification_log`): `POST /admin/whatsapp-summary` con `{ "password": "admin", "kind": "daily"|"weekly", "date"?: "YYYY-MM-DD", "send"?: true }`.
+
 ## API principal
 
 | Método | Ruta | Descripción |
@@ -72,6 +98,8 @@ PORT=3000
 | GET | `/weekly/:user_id` | Total lun–sáb |
 | GET | `/week-days/:user_id` | Array `{ date, hours }` lun–sáb |
 | GET | `/all-users` | Admin: usuarios + teléfono + totales |
+| POST | `/admin/test-whatsapp` | Admin (`password`): mensaje de prueba por WhatsApp |
+| POST | `/admin/whatsapp-summary` | Admin (`password`): vista previa / envío manual del resumen diario o semanal |
 
 ## Cómo probar
 
@@ -85,6 +113,8 @@ PORT=3000
 ## Estructura
 
 - `server.js` — API + migración de `phone` + índices + redondeo
+- `notifier.js` — envío WhatsApp (CallMeBot / TextMeBot) con cola y reintento
+- `whatsapp-reports.js` — alertas en tiempo real + resúmenes programados (`notification_log`)
 - `index.html` — UI PWA
 - `sw.js` — cache v8 + notificaciones por mensaje
 - `manifest.json` — metadatos PWA

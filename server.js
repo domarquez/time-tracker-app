@@ -3,6 +3,8 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 require('dotenv').config();
+const notifier = require('./notifier');
+const { createWhatsappReports } = require('./whatsapp-reports');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -16,6 +18,9 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
+
+// Alertas / resúmenes WhatsApp al admin (ver notifier.js / whatsapp-reports.js)
+const whatsapp = createWhatsappReports({ pool, TZ, formatHours });
 
 /** Normalize phone: keep leading +, digits only after that (Bolivia-friendly). */
 function normalizePhone(raw) {
@@ -160,6 +165,21 @@ async function initDB() {
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS time_entries_one_open_per_user
     ON time_entries (user_id) WHERE end_time IS NULL;
+  `);
+
+  // Marcas de envío de notificaciones (resúmenes WhatsApp): evita duplicar tras reinicios
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notification_log (
+      id SERIAL PRIMARY KEY,
+      kind TEXT NOT NULL,
+      ref_date DATE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 1,
+      last_error TEXT,
+      claimed_at TIMESTAMPTZ DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      UNIQUE (kind, ref_date)
+    );
   `);
 
   console.log('Base de datos lista');
@@ -322,6 +342,7 @@ async function closeEntryAuto(row, { stop_reason, observation, endAt } = {}) {
   if (upd.rows.length) {
     const weekStart = await getWeekStartLaPaz(startTime.toISOString());
     await updateWeeklySummary(row.user_id, weekStart, minutes);
+    whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes });
   }
 
   const fmt = formatHours(minutes);
@@ -585,6 +606,7 @@ app.post('/start', async (req, res) => {
       entry_id: result.rows[0].id,
       start_time: result.rows[0].start_time
     });
+    whatsapp.alertStart(user_id, new Date());
   } catch (e) {
     if (e.code === '23505') {
       return res.status(409).json({ error: 'Ya hay un turno abierto' });
@@ -641,7 +663,7 @@ app.post('/stop', async (req, res) => {
     const reason = stop_reason || (isAuto ? 'auto' : 'manual');
     const obs = observation || null;
 
-    await pool.query(
+    const upd = await pool.query(
       `UPDATE time_entries
        SET end_time = NOW(),
            duration_minutes = $1,
@@ -651,9 +673,14 @@ app.post('/stop', async (req, res) => {
            stop_reason = $5,
            night_ask_at = NULL,
            night_ask_phase = NULL
-       WHERE id = $6`,
+       WHERE id = $6 AND end_time IS NULL
+       RETURNING id`,
       [minutes, isAuto ? null : (latitude ?? null), isAuto ? null : (longitude ?? null), obs, reason, row.id]
     );
+    // Otro proceso (cron nocturno / doble click) ya lo cerró: no sumar dos veces
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: 'No hay turno abierto' });
+    }
 
     if (!isAuto && (latitude != null || longitude != null)) {
       await pool.query(
@@ -679,6 +706,11 @@ app.post('/stop', async (req, res) => {
       end_latitude: isAuto ? null : (latitude ?? null),
       end_longitude: isAuto ? null : (longitude ?? null)
     });
+    if (isAuto) {
+      whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes });
+    } else {
+      whatsapp.alertStop(row.user_id, minutes, endTime);
+    }
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1001,9 +1033,19 @@ app.get('/history/:user_id', async (req, res) => {
 });
 
 // === ADMIN ROUTES ===
+const ADMIN_USERNAME = 'diegoadmin';
+const ADMIN_PASSWORD = 'admin';
+
+/** Chequeo admin simple (mismo criterio que /login-admin; username opcional). */
+function isAdminBody(body = {}) {
+  const { username, password } = body;
+  if (password !== ADMIN_PASSWORD) return false;
+  return username == null || username === '' || username === ADMIN_USERNAME;
+}
+
 app.post('/login-admin', async (req, res) => {
   const { username, password } = req.body;
-  if (username === 'diegoadmin' && password === 'admin') {
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     res.json({ success: true, isAdmin: true });
   } else {
     res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
@@ -1026,6 +1068,56 @@ app.get('/all-users', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+/** Prueba de WhatsApp al admin. Body: { password: 'admin', username? } */
+app.post('/admin/test-whatsapp', (req, res) => {
+  if (!isAdminBody(req.body)) {
+    return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+  }
+  const st = notifier.status();
+  if (!st.enabled) {
+    return res.status(503).json({
+      success: false,
+      error: 'WhatsApp deshabilitado: falta CALLMEBOT_APIKEY o WHATSAPP_ENABLED=false',
+      whatsapp: st
+    });
+  }
+  // No esperar al proveedor: se encola y se responde enseguida
+  notifier.notify('✅ Prueba de Control de Horas', { tag: 'test' });
+  res.status(202).json({ success: true, queued: true, whatsapp: st });
+});
+
+/**
+ * Vista previa (y envío opcional) de resúmenes, sin tocar notification_log.
+ * Body: { password, kind: 'daily'|'weekly', date?: 'YYYY-MM-DD', send?: true }
+ */
+app.post('/admin/whatsapp-summary', async (req, res) => {
+  if (!isAdminBody(req.body)) {
+    return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+  }
+  const kind = req.body.kind === 'weekly' ? 'weekly' : 'daily';
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.date || ''))
+    ? req.body.date
+    : whatsapp.laPazParts().date;
+  try {
+    let text;
+    if (kind === 'weekly') {
+      const wd = new Date(`${date}T12:00:00Z`).getUTCDay(); // 0=dom
+      const monday = whatsapp.addDays(date, wd === 0 ? -6 : 1 - wd);
+      text = await whatsapp.buildWeeklySummary(monday);
+    } else {
+      text = await whatsapp.buildDailySummary(date);
+    }
+    const send = req.body.send === true || req.body.send === 'true';
+    if (send) notifier.notify(text, { tag: `manual-${kind}` });
+    res.json({ success: true, kind, date, sent: send && notifier.status().enabled, text });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Resúmenes WhatsApp (diario 21:30 lun–sáb, semanal sáb 21:45, La Paz)
+whatsapp.startScheduler();
 
 // Cron cada 60s: cortes nocturnos / medianoche aunque el cliente no pollee
 setInterval(runNightCron, 60 * 1000);
