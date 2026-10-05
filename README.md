@@ -18,7 +18,7 @@ App simple (PWA) para registrar turnos continuos del personal. UI en español. Z
   - **Tope de seguridad**: `MAX_SHIFT_HOURS` (default **16 h**) → corte automático al cumplir ese largo, aunque haya confirmado (`tope_turno`; `end_time` = inicio + tope).
   - Ya **no** hay corte fijo a las 00:00.
 - **Día de un turno**: todas sus horas cuentan para el **día La Paz en que empezó** (columna `date`), incluida la parte después de medianoche — en HOY, SEMANA, día a día y en los resúmenes de WhatsApp. Un turno nuevo a la mañana siguiente (p. ej. 10:00 tras apagar a las 02:00) es otro turno, en su propio día. Sigue rigiendo un solo turno abierto por usuario.
-- **Admin**: panel con lista de usuarios (incluye teléfono).
+- **Admin** (`/admin`, protegido con `ADMIN_PASSWORD`): estado de hoy por trabajador, PRENDER/APAGAR por cualquiera (con hora opcional para registro tardío), alta de trabajadores, tarifa Bs/hora y vista previa de resúmenes. API JSON para curl/asistente y comandos por WhatsApp (opcional). Ver **Administración** abajo.
 - **Instalable** como PWA.
 
 ## Reglas de redondeo
@@ -94,6 +94,12 @@ Content-Type: application/json
 | `NIGHT_ASK_EVERY_MIN` | `60` | Frecuencia de las preguntas después de las 23:00 (mín. 15). |
 | `NIGHT_ASK_TIMEOUT_MIN` | `15` | Minutos para responder antes del corte automático. |
 | `MAX_SHIFT_HOURS` | `16` | Tope de largo de turno (corte automático). |
+| `ADMIN_PASSWORD` | `admin` (con aviso) | Contraseña del panel y de la API de admin. **Definila**: sin ella se usa `admin` y se avisa en el log y en el panel. |
+| `SEED_WORKERS` | — | Alta automática al arrancar, idempotente: `Nombre:+591XXXXXXXX,Otro:7XXXXXXX`. No duplica si el celular ya existe en cualquier formato. |
+| `WHATSAPP_WORKER_RECEIPTS` | `true` | Comprobante al trabajador al iniciar/terminar (`✅ Inicio registrado…` / `🔴 Fin registrado…`). |
+| `WORKER_WEEKLY_RECEIPT` | `true` | Sábado 21:45: a cada trabajador sus horas de la semana (y Bs si tiene tarifa). |
+| `ADMIN_START_REMINDER_TIMES` | `08:00,08:30,09:00,09:30,10:00,10:30,11:30,12:30,13:30,14:30` | Lun–sáb: aviso al admin con quién no inició (solo si falta alguien). |
+| `EVOLUTION_WEBHOOK_TOKEN` | — | Activa `POST /webhook/evolution?token=…` (comandos del admin por WhatsApp). Sin token, el endpoint responde 404. |
 
 **Alternativas (opcionales):** `WHATSAPP_PROVIDER=callmebot` + `CALLMEBOT_APIKEY` (API gratuita de CallMeBot) o `WHATSAPP_PROVIDER=textmebot` + `TEXTMEBOT_APIKEY`.
 
@@ -119,6 +125,53 @@ Los envíos pasan por una cola en memoria (≥ 8 s + 0–3 s aleatorios entre me
 
 **Probar:** `POST /admin/test-whatsapp` con `{ "password": "admin" }` → envía `✅ Prueba de Control de Horas`. Vista previa de resúmenes (no marca `notification_log`): `POST /admin/whatsapp-summary` con `{ "password": "admin", "kind": "daily"|"weekly", "date"?: "YYYY-MM-DD", "send"?: true }`.
 
+## Administración
+
+### Pantalla
+`https://<app>/admin` (botón “👑 Administrador” de la app). Pide `ADMIN_PASSWORD` (se guarda solo en la pestaña). Muestra por trabajador: estado (🟢 prendido / ✅ trabajó hoy / ⚪ sin inicio), turnos de hoy con hora de entrada–salida y si los registró el admin, horas de hoy y de la semana, Bs de la semana (si tiene tarifa). Botones PRENDER/APAGAR con **hora opcional** (registro tardío), “Prender a los que faltan”, registrar trabajador (nombre + celular + tarifa), guardar tarifa y vista previa de resúmenes. Se refresca cada 30 s.
+
+### API para curl / asistente
+Contraseña en el body (`password`) o en el header `x-admin-password`. `worker` = nombre (sin importar mayúsculas/tildes; exacto, primer nombre, prefijo o contiene) o celular (`+591 7…`, `7…`) o id. `time` = `HH:MM` de **hoy en La Paz** (opcional; no puede ser futura; un inicio no puede superponerse con el turno anterior; un fin debe ser posterior al inicio). `note` queda como observación del turno.
+
+```bash
+APP=https://time-tracker-app-production-2a17.up.railway.app
+# Jimi empezó (ahora)
+curl -s -X POST $APP/admin/shift/start -H 'content-type: application/json' \
+  -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"jimi"}'
+# Leo empezó a las 8 (registro tardío) con nota
+curl -s -X POST $APP/admin/shift/start -H 'content-type: application/json' \
+  -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"Leo","time":"08:00","note":"avisó por chat"}'
+# Jimi terminó a las 17:30
+curl -s -X POST $APP/admin/shift/stop -H 'content-type: application/json' \
+  -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"jimi","time":"17:30"}'
+# Estado de hoy
+curl -s $APP/admin/status -H "x-admin-password: $ADMIN_PASSWORD"
+```
+
+Respuestas: `200 { success, worker, start | end, duration_hours, today_hours, week_hours, message }`; `404` (no existe, con `candidates`), `409` (nombre ambiguo con `candidates`, ya tiene turno abierto o se superpone), `400` (hora inválida/futura), `401` (contraseña), `429` (10 intentos fallidos en 15 min).
+`/admin/status` → `{ today, week_start, workers: [{ id, name, phone, state: prendido|apagado|sin_inicio, shifts: [{ start, end, open, hours, started_by, stopped_by, note }], today_hours, week_hours, hourly_rate, week_pay_bs }], text }`.
+
+Cada inicio/fin hecho por el admin marca `time_entries.started_by` / `stopped_by = 'admin'` (trabajador = `worker`, cortes = `auto`), no exige GPS (acepta `latitude`/`longitude` opcionales) y dispara la alerta al admin (`… (por el admin)`) y el comprobante al trabajador.
+
+Otras rutas del panel: `GET /admin/api/workers`, `POST /admin/api/workers` `{ name, phone, hourly_rate? }` (alta idempotente por celular), `POST /admin/api/workers/:id/rate` `{ hourly_rate }`, `POST /admin/api/start|stop` `{ user_id }` o `{ all: true }` (start all = los que no iniciaron hoy; stop all = todos los abiertos), `POST /admin/api/summary` `{ kind }`.
+
+### Comandos por WhatsApp (opcional, no conectado)
+`POST /webhook/evolution?token=<EVOLUTION_WEBHOOK_TOKEN>` recibe eventos `messages.upsert` de Evolution v2. Solo procesa mensajes de `ADMIN_WHATSAPP_PHONE` (no grupos, no `fromMe`) que empiecen con un comando; **todo lo demás se ignora en silencio** (la instancia `precios-ferreterias` es compartida con el proyecto de proveedores). Dedup por id de mensaje.
+- `inicio jimi`, `inicio leo 8:30`, `inicio todos` (los que no iniciaron hoy)
+- `fin jimi`, `fin leo a las 17`, `fin todos` (todos los abiertos)
+- `estado`, `ayuda`
+
+Los inicios/fines exitosos se confirman con la alerta en tiempo real; solo se responde `estado`/`ayuda` y los errores. **No se modificó la configuración de webhook de la instancia**: para usarlo hay que agregar esta URL en Evolution (si la instancia ya tiene un webhook del otro proyecto, conviene un reenvío desde ese webhook o una instancia propia).
+
+### Mensajes
+- Al trabajador al iniciar/terminar (por app o por el admin): `✅ Inicio registrado 08:00 — Jimi` / `🔴 Fin registrado 17:40 — 8.5 h hoy, 8.5 h esta semana` (+ ` (registrado por el admin)`).
+- Al admin, lun–sáb a las 08:00, 08:30 … 10:30 y luego 11:30 … 14:30 (`ADMIN_START_REMINDER_TIMES`), **solo si falta alguien**: `⏰ Sin inicio a las 08:30: Jimi, Leo. Entrá a <APP_URL>/admin para registrar.` (mismo criterio que el recordatorio al trabajador: con teléfono, activos, sin turno hoy ni abierto, sin el admin ni usuarios de prueba).
+- Semanal con pago: `• *Jimi*: 16.5 h — Bs 330` … `*Total: 47.0 h — Bs 803.75*` (Bs = horas acreditadas × tarifa; solo si hay tarifa).
+- Sábado 21:45 a cada trabajador con horas: `📊 Tu semana 05/10–10/10: 16.5 h — Bs 330. ¡Gracias, Jimi!`.
+
+### Usuarios
+Tabla `users (id, name UNIQUE, phone, hourly_rate, latitude, longitude, created_at)`. El login busca el celular en cualquier formato (`+591…`, `591…`, `7…`), así un trabajador dado de alta por el admin entra con su número sin duplicarse; los nuevos se guardan como `+591XXXXXXXX`.
+
 ## API principal
 
 | Método | Ruta | Descripción |
@@ -133,7 +186,7 @@ Los envíos pasan por una cola en memoria (≥ 8 s + 0–3 s aleatorios entre me
 | GET | `/daily/:user_id` | Total de hoy (La Paz) |
 | GET | `/weekly/:user_id` | Total lun–sáb |
 | GET | `/week-days/:user_id` | Array `{ date, hours }` lun–sáb |
-| GET | `/all-users` | Admin: usuarios + teléfono + totales |
+| GET | `/all-users` | Admin (header `x-admin-password`): usuarios + teléfono + totales |
 | POST | `/admin/test-whatsapp` | Admin (`password`): mensaje de prueba por WhatsApp |
 | POST | `/admin/whatsapp-summary` | Admin (`password`): vista previa / envío manual del resumen diario o semanal |
 
@@ -150,9 +203,11 @@ Los envíos pasan por una cola en memoria (≥ 8 s + 0–3 s aleatorios entre me
 
 - `server.js` — API + migración de `phone` + índices + redondeo
 - `notifier.js` — envío WhatsApp (Evolution API v2; alternativas CallMeBot / TextMeBot) con cola y reintento
+- `admin.js` — panel/API de admin, autenticación, comandos y webhook de Evolution
+- `admin.html` — pantalla de administrador (`/admin`)
 - `whatsapp-reports.js` — alertas en tiempo real + aviso 20:00 + resúmenes programados (`notification_log`)
 - `tz-sql.js` — conversión UTC → La Paz en SQL (`start_time`/`end_time` son `TIMESTAMP` sin zona en UTC)
 - `index.html` — UI PWA
-- `sw.js` — cache v9 + notificaciones por mensaje
+- `sw.js` — cache v10 + notificaciones por mensaje
 - `manifest.json` — metadatos PWA
 - `package.json` — dependencias

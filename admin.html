@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex">
+    <title>Admin — Control de Horas</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+<div class="max-w-xl mx-auto p-4 space-y-4">
+    <h1 class="text-2xl font-bold text-purple-400 text-center">👑 Panel de Administrador</h1>
+
+    <!-- LOGIN -->
+    <div id="login" class="space-y-3 bg-gray-800 p-5 rounded-2xl">
+        <input id="pwd" type="password" placeholder="Contraseña de administrador" class="w-full p-3 bg-gray-700 rounded-xl text-lg" autocomplete="current-password">
+        <button onclick="doLogin()" class="w-full bg-purple-600 hover:bg-purple-700 py-3 rounded-xl font-bold">Entrar</button>
+        <p id="login-err" class="text-red-400 text-sm hidden"></p>
+    </div>
+
+    <!-- PANEL -->
+    <div id="panel" class="hidden space-y-4">
+        <div id="weak" class="hidden bg-amber-600 text-gray-900 p-3 rounded-xl text-sm font-semibold">
+            ⚠️ Estás usando la contraseña por defecto. Definí <code>ADMIN_PASSWORD</code> en Railway.
+        </div>
+        <div class="flex items-center justify-between text-sm text-gray-400">
+            <span id="today"></span>
+            <span>
+                <button onclick="load()" class="underline">Actualizar</button> ·
+                <button onclick="logout()" class="underline">Salir</button>
+            </span>
+        </div>
+
+        <div class="bg-gray-800 p-3 rounded-2xl flex flex-wrap gap-2 items-center">
+            <label class="text-sm text-gray-300">Hora (opcional, registro tardío):</label>
+            <input id="at" type="time" class="p-2 bg-gray-700 rounded-lg">
+            <button onclick="document.getElementById('at').value=''" class="text-xs underline text-gray-400">ahora</button>
+            <button onclick="startAll()" class="ml-auto bg-green-700 hover:bg-green-600 px-3 py-2 rounded-lg text-sm font-semibold">Prender a los que faltan</button>
+        </div>
+
+        <div id="workers" class="space-y-3"></div>
+
+        <details class="bg-gray-800 p-4 rounded-2xl">
+            <summary class="font-semibold cursor-pointer">➕ Registrar trabajador</summary>
+            <div class="space-y-2 mt-3">
+                <input id="nw-name" placeholder="Nombre" class="w-full p-3 bg-gray-700 rounded-xl">
+                <input id="nw-phone" type="tel" placeholder="Celular (+591 7xxxxxxx)" class="w-full p-3 bg-gray-700 rounded-xl">
+                <input id="nw-rate" type="number" min="0" step="0.5" placeholder="Tarifa Bs/hora (opcional)" class="w-full p-3 bg-gray-700 rounded-xl">
+                <button onclick="addWorker()" class="w-full bg-blue-600 hover:bg-blue-700 py-3 rounded-xl font-bold">Guardar</button>
+            </div>
+        </details>
+
+        <details class="bg-gray-800 p-4 rounded-2xl">
+            <summary class="font-semibold cursor-pointer">📊 Resúmenes (vista previa)</summary>
+            <div class="flex gap-2 mt-3">
+                <button onclick="preview('daily')" class="flex-1 bg-gray-700 py-2 rounded-xl">Diario</button>
+                <button onclick="preview('weekly')" class="flex-1 bg-gray-700 py-2 rounded-xl">Semanal</button>
+            </div>
+            <pre id="preview" class="whitespace-pre-wrap text-sm mt-3 text-gray-200"></pre>
+        </details>
+    </div>
+    <div id="toast" class="hidden fixed bottom-4 left-4 right-4 max-w-xl mx-auto bg-gray-700 p-3 rounded-xl text-center"></div>
+</div>
+<script>
+    let pwd = sessionStorage.getItem('adminPwd') || '';
+    let names = {};
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+    function toast(msg, ms = 4000) {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.remove('hidden');
+        clearTimeout(toast._t);
+        toast._t = setTimeout(() => t.classList.add('hidden'), ms);
+    }
+
+    async function api(method, url, body) {
+        const res = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json', 'x-admin-password': pwd },
+            body: body ? JSON.stringify(body) : undefined,
+            cache: 'no-store'
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401) { logout(); throw new Error('Contraseña incorrecta'); }
+        if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+        return data;
+    }
+
+    async function doLogin() {
+        pwd = document.getElementById('pwd').value;
+        const err = document.getElementById('login-err');
+        try {
+            await api('POST', '/admin/api/login', {});
+            sessionStorage.setItem('adminPwd', pwd);
+            err.classList.add('hidden');
+            showPanel();
+        } catch (e) {
+            err.textContent = e.message;
+            err.classList.remove('hidden');
+        }
+    }
+
+    function logout() {
+        pwd = '';
+        sessionStorage.removeItem('adminPwd');
+        document.getElementById('panel').classList.add('hidden');
+        document.getElementById('login').classList.remove('hidden');
+    }
+
+    function showPanel() {
+        document.getElementById('login').classList.add('hidden');
+        document.getElementById('panel').classList.remove('hidden');
+        load();
+    }
+
+    function stateBadge(w) {
+        if (w.state === 'prendido') return '<span class="text-green-400 font-semibold">🟢 Prendido</span>';
+        if (w.state === 'apagado') return '<span class="text-blue-300">✅ Trabajó hoy</span>';
+        return '<span class="text-gray-400">⚪ Sin inicio</span>';
+    }
+
+    function shiftsText(w) {
+        if (!w.shifts.length) return '';
+        return w.shifts.map(s => {
+            const tag = (s.started_by === 'admin' || s.stopped_by === 'admin') ? ' <span class="text-purple-300">(admin)</span>' : '';
+            return `${esc(s.start)}–${s.open ? 'sigue' : esc(s.end)}${s.hours ? ` (${esc(s.hours)} h)` : ''}${tag}`;
+        }).join(', ');
+    }
+
+    async function load() {
+        try {
+            const d = await api('GET', '/admin/status');
+            names = Object.fromEntries(d.workers.map(w => [w.id, w.name]));
+            document.getElementById('weak').classList.toggle('hidden', !d.weak_password);
+            document.getElementById('today').textContent = `Hoy ${d.today.slice(8, 10)}/${d.today.slice(5, 7)}`;
+            document.getElementById('workers').innerHTML = d.workers.map(w => `
+                <div class="bg-gray-800 p-4 rounded-2xl space-y-2">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <div class="font-bold text-lg">${esc(w.name)}</div>
+                            <div class="text-xs text-gray-400">${esc(w.phone || 'sin teléfono')}</div>
+                        </div>
+                        <div class="text-right text-sm">${stateBadge(w)}</div>
+                    </div>
+                    <div class="text-sm text-gray-300">${shiftsText(w) || '<span class="text-gray-500">Sin turnos hoy</span>'}</div>
+                    <div class="text-sm">Hoy <b class="text-yellow-400">${esc(w.today_hours)} h</b> · Semana <b class="text-purple-300">${esc(w.week_hours)} h</b>${w.week_pay_bs != null ? ` · <b class="text-emerald-300">Bs ${esc(w.week_pay_bs)}</b>` : ''}</div>
+                    <div class="flex gap-2 items-center">
+                        ${w.state === 'prendido'
+                            ? `<button onclick="act('stop', ${w.id})" class="flex-1 bg-red-600 hover:bg-red-700 py-2 rounded-xl font-bold">APAGAR</button>`
+                            : `<button onclick="act('start', ${w.id})" class="flex-1 bg-green-600 hover:bg-green-700 py-2 rounded-xl font-bold">PRENDER</button>`}
+                        <input id="rate-${w.id}" type="number" min="0" step="0.5" value="${w.hourly_rate ?? ''}" placeholder="Bs/h" class="w-20 p-2 bg-gray-700 rounded-lg text-sm">
+                        <button onclick="saveRate(${w.id})" class="text-xs underline text-gray-300">guardar tarifa</button>
+                    </div>
+                </div>`).join('') || '<p class="text-gray-400 text-center">No hay trabajadores.</p>';
+        } catch (e) {
+            toast(e.message);
+        }
+    }
+
+    async function act(kind, id) {
+        const name = (names[id] || '');
+        const time = document.getElementById('at').value;
+        const label = kind === 'start' ? 'PRENDER' : 'APAGAR';
+        if (!confirm(`${label} a ${name}${time ? ` a las ${time}` : ' ahora'}?`)) return;
+        try {
+            const r = await api('POST', `/admin/shift/${kind}`, { worker: String(id), time: time || undefined });
+            toast(r.message || 'Listo');
+            document.getElementById('at').value = '';
+            load();
+        } catch (e) {
+            toast(`⚠️ ${e.message}`, 6000);
+        }
+    }
+
+    async function startAll() {
+        if (!confirm('¿Prender ahora a todos los que todavía no iniciaron hoy?')) return;
+        try {
+            const r = await api('POST', '/admin/api/start', { all: true });
+            toast(r.results.length ? r.results.map(x => `${x.name}: ${x.ok ? 'ok' : x.error}`).join(' · ') : 'No falta nadie', 6000);
+            load();
+        } catch (e) { toast(e.message); }
+    }
+
+    async function saveRate(id) {
+        const v = document.getElementById(`rate-${id}`).value;
+        try {
+            await api('POST', `/admin/api/workers/${id}/rate`, { hourly_rate: v === '' ? null : Number(v) });
+            toast('Tarifa guardada');
+            load();
+        } catch (e) { toast(e.message); }
+    }
+
+    async function addWorker() {
+        const name = document.getElementById('nw-name').value.trim();
+        const phone = document.getElementById('nw-phone').value.trim();
+        const rate = document.getElementById('nw-rate').value;
+        try {
+            const r = await api('POST', '/admin/api/workers', { name, phone, hourly_rate: rate === '' ? undefined : Number(rate) });
+            toast(r.created ? `Registrado: ${r.user.name}` : `Ya existía: ${r.user.name}`);
+            ['nw-name', 'nw-phone', 'nw-rate'].forEach(id => document.getElementById(id).value = '');
+            load();
+        } catch (e) { toast(e.message); }
+    }
+
+    async function preview(kind) {
+        try {
+            const r = await api('POST', '/admin/api/summary', { kind });
+            document.getElementById('preview').textContent = r.text;
+        } catch (e) { toast(e.message); }
+    }
+
+    document.getElementById('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    if (pwd) showPanel();
+    setInterval(() => { if (pwd && !document.hidden) load(); }, 30000);
+</script>
+</body>
+</html>

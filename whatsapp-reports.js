@@ -9,8 +9,11 @@
  *    una vez por turno abierto y por día (notification_log kind 'left_on:<entry_id>')
  *  - Recordatorio de inicio al trabajador: lunes a sábado, START_REMINDER_TIMES
  *    (default 08:00,10:00,12:00), solo si ese día todavía no prendió
+ *  - Recordatorio al ADMIN de quién no inició: lunes a sábado, ADMIN_START_REMINDER_TIMES
+ *    (default 08:00,08:30,09:00,09:30,10:00,10:30,11:30,12:30,13:30,14:30), solo si falta alguien
  *  - Resumen diario:  lunes a sábado, DAILY_SUMMARY_TIME  (default 21:30)
- *  - Resumen semanal: sábado,         WEEKLY_SUMMARY_TIME (default 21:45)
+ *  - Resumen semanal: sábado,         WEEKLY_SUMMARY_TIME (default 21:45), con Bs si hay tarifa;
+ *    y a cada trabajador sus horas de la semana (WORKER_WEEKLY_RECEIPT, default true)
  * Si el servidor estuvo caído a esa hora, se envía en cuanto vuelve
  * (mientras sea el mismo día en La Paz).
  */
@@ -114,20 +117,71 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     return v == null || v === '' || !/^(0|false|no|off)$/i.test(v.trim());
   }
 
+  const byAdmin = (by) => (by === 'admin' ? ' (por el admin)' : '');
+
   // ---------- Alertas en tiempo real ----------
-  function alertStart(userId, at = new Date()) {
+  function alertStart(userId, at = new Date(), { by } = {}) {
     if (!realtimeEnabled()) return;
     background('alertStart', async () => {
       const name = await userName(userId);
-      await notifier.notify(`🟢 *${name}* prendió a las ${hhmm(at)}`, { tag: 'start' });
+      await notifier.notify(`🟢 *${name}* prendió a las ${hhmm(at)}${byAdmin(by)}`, { tag: 'start' });
     });
   }
 
-  function alertStop(userId, minutes, at = new Date()) {
+  function alertStop(userId, minutes, at = new Date(), { by } = {}) {
     if (!realtimeEnabled()) return;
     background('alertStop', async () => {
       const name = await userName(userId);
-      await notifier.notify(`🔴 *${name}* apagó a las ${hhmm(at)} — ${h(minutes)}`, { tag: 'stop' });
+      await notifier.notify(`🔴 *${name}* apagó a las ${hhmm(at)} — ${h(minutes)}${byAdmin(by)}`, { tag: 'stop' });
+    });
+  }
+
+  // ---------- Comprobante al trabajador (inicio / fin) ----------
+  const receiptsEnabled = () => {
+    const v = process.env.WHATSAPP_WORKER_RECEIPTS;
+    return v == null || v.trim() === '' || !/^(0|false|no|off)$/i.test(v.trim());
+  };
+
+  /** Lunes (YYYY-MM-DD) de la semana de dateStr. */
+  function mondayOf(dateStr) {
+    const wd = weekdayOf(dateStr);
+    return addDays(dateStr, wd === 0 ? -6 : 1 - wd);
+  }
+
+  /** Minutos acreditados del trabajador en el día y en la semana (lun–sáb) de dateStr. */
+  async function workerTotals(userId, dateStr) {
+    const monday = mondayOf(dateStr);
+    const r = await pool.query(
+      `SELECT COALESCE(SUM(duration_minutes) FILTER (WHERE ${entryDay('te')} = $2::date), 0)::int AS day_min,
+              COALESCE(SUM(duration_minutes), 0)::int AS week_min
+       FROM time_entries te
+       WHERE te.user_id = $1 AND te.end_time IS NOT NULL
+         AND ${entryDay('te')} BETWEEN $3::date AND $3::date + 5`,
+      [userId, dateStr, monday]
+    );
+    return r.rows[0];
+  }
+
+  function receiptStart(entryId) {
+    if (!realtimeEnabled() || !receiptsEnabled()) return;
+    background('receiptStart', async () => {
+      const e = await entryInfo(entryId);
+      if (!e || !e.phone) return;
+      const por = e.started_by === 'admin' ? ' (registrado por el admin)' : '';
+      await sendOnce(`worker_receipt:${e.id}:start`, e.day,
+        `✅ Inicio registrado ${e.start_hm} — ${e.name}${por}`, { to: e.phone });
+    });
+  }
+
+  function receiptStop(entryId) {
+    if (!realtimeEnabled() || !receiptsEnabled()) return;
+    background('receiptStop', async () => {
+      const e = await entryInfo(entryId);
+      if (!e || !e.phone || !e.end_hm) return;
+      const t = await workerTotals(e.user_id, e.day);
+      const por = e.stopped_by === 'admin' ? ' (registrado por el admin)' : '';
+      await sendOnce(`worker_receipt:${e.id}:stop`, e.day,
+        `🔴 Fin registrado ${e.end_hm} — ${h(t.day_min)} hoy, ${h(t.week_min)} esta semana${por}`, { to: e.phone });
     });
   }
 
@@ -147,7 +201,8 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
       `SELECT te.id, te.user_id, u.name, u.phone,
               ${entryDay('te')}::text AS day,
               to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm,
-              to_char(${laPazWall('te.end_time')}, 'HH24:MI') AS end_hm
+              to_char(${laPazWall('te.end_time')}, 'HH24:MI') AS end_hm,
+              te.started_by, te.stopped_by
        FROM time_entries te JOIN users u ON u.id = te.user_id
        WHERE te.id = $1`,
       [entryId]
@@ -324,14 +379,14 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const weekEnd = addDays(weekStart, 5); // sábado
     const [totals, obs, open] = await Promise.all([
       pool.query(
-        `SELECT u.id, u.name, u.phone,
+        `SELECT u.id, u.name, u.phone, u.hourly_rate,
                 COALESCE(SUM(te.duration_minutes), 0)::int AS minutes
          FROM users u
          LEFT JOIN time_entries te
            ON te.user_id = u.id
           AND te.end_time IS NOT NULL
           AND ${entryDay('te')} BETWEEN $1::date AND $2::date
-         GROUP BY u.id, u.name, u.phone
+         GROUP BY u.id, u.name, u.phone, u.hourly_rate
          HAVING COALESCE(SUM(te.duration_minutes), 0) > 0 OR bool_or(u.phone IS NOT NULL)
          ORDER BY minutes DESC, u.name`,
         [weekStart, weekEnd]
@@ -355,12 +410,18 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const total = worked.reduce((a, r) => a + r.minutes, 0);
 
     const lines = [`📊 *Resumen semanal* ${ddmm(weekStart)}–${ddmm(weekEnd)}`];
+    let totalBs = 0;
+    let anyRate = false;
     if (worked.length) {
-      for (const r of worked) lines.push(`• *${r.name}*: ${h(r.minutes)}`);
+      for (const r of worked) {
+        const pay = payBs(r.minutes, r.hourly_rate);
+        if (pay != null) { anyRate = true; totalBs += pay; }
+        lines.push(`• *${r.name}*: ${h(r.minutes)}${pay != null ? ` — ${bs(pay)}` : ''}`);
+      }
     } else {
       lines.push('Sin horas registradas.');
     }
-    lines.push(`*Total: ${h(total)}*`);
+    lines.push(`*Total: ${h(total)}${anyRate ? ` — ${bs(totalBs)}` : ''}*`);
     if (zero.length) lines.push(`Sin horas: ${zero.map((r) => r.name).join(', ')}`);
     if (obs.rows.length) {
       lines.push(`⚠️ Observaciones (${obs.rows.length}):`);
@@ -371,6 +432,41 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     }
     if (open.rows[0].n) lines.push(`⏳ Turnos aún abiertos: ${open.rows[0].n} (no suman)`);
     return lines.join('\n');
+  }
+
+  // ---------- Pago (Bs) ----------
+  /** Bs ganados = horas acreditadas × tarifa; null si no hay tarifa. */
+  function payBs(minutes, rate) {
+    if (rate == null || rate === '') return null;
+    const r = Number(rate);
+    if (!Number.isFinite(r)) return null;
+    return Math.round((Number(minutes) || 0) / 60 * r * 100) / 100;
+  }
+  const bs = (n) => `Bs ${Number(n).toFixed(2).replace(/\.00$/, '')}`;
+
+  /** Comprobante semanal a cada trabajador con horas (sábado, junto al resumen). */
+  async function runWorkerWeekly(monday) {
+    const v = process.env.WORKER_WEEKLY_RECEIPT;
+    if (v != null && /^(0|false|no|off)$/i.test(v.trim())) return;
+    if (!notifier.workerAlertsEnabled()) return;
+    const sat = addDays(monday, 5);
+    const r = await pool.query(
+      `SELECT u.id, u.name, u.phone, u.hourly_rate, SUM(te.duration_minutes)::int AS minutes
+       FROM users u JOIN time_entries te ON te.user_id = u.id
+       WHERE u.phone IS NOT NULL AND te.end_time IS NOT NULL
+         AND ${entryDay('te')} BETWEEN $1::date AND $2::date
+       GROUP BY u.id, u.name, u.phone, u.hourly_rate
+       HAVING SUM(te.duration_minutes) > 0
+       ORDER BY u.name`,
+      [monday, sat]
+    );
+    for (const u of r.rows) {
+      if (isAdminPhone(u.phone)) continue;
+      const pay = payBs(u.minutes, u.hourly_rate);
+      await sendOnce(`worker_weekly:${u.id}`, monday,
+        `📊 Tu semana ${ddmm(monday)}–${ddmm(sat)}: ${h(u.minutes)}${pay != null ? ` — ${bs(pay)}` : ''}. ¡Gracias, ${u.name}!`,
+        { to: u.phone });
+    }
   }
 
   // ---------- Marcas persistentes ----------
@@ -523,6 +619,37 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     }
   }
 
+  // ---------- Recordatorio al admin: quién no inició (lun–sáb) ----------
+  function adminReminderTimes() {
+    const raw = process.env.ADMIN_START_REMINDER_TIMES;
+    const def = '08:00,08:30,09:00,09:30,10:00,10:30,11:30,12:30,13:30,14:30';
+    const list = (raw == null || raw.trim() === '' ? def : raw)
+      .split(',').map((t) => parseHHMM(t, null)).filter((m) => m != null);
+    return [...new Set(list)].sort((a, b) => a - b);
+  }
+
+  const adminUrl = () => `${appUrl()}/admin`;
+
+  function adminMissingText(slotLabel, names) {
+    const reply = process.env.EVOLUTION_WEBHOOK_TOKEN ? ' o respondé "inicio <nombre>"' : '';
+    return `⏰ Sin inicio a las ${slotLabel}: ${names.join(', ')}. Entrá a ${adminUrl()}${reply} para registrar.`;
+  }
+
+  async function runAdminStartReminders(p) {
+    if (!realtimeEnabled()) return;
+    if (p.weekday < 1 || p.weekday > 6) return;
+    const minuteOfDay = p.hour * 60 + p.minute;
+    // Solo el último horario alcanzado y como mucho 30 min tarde (no manda varios juntos)
+    const due = adminReminderTimes().filter((m) => m <= minuteOfDay && minuteOfDay - m < 30);
+    if (!due.length) return;
+    const slot = due[due.length - 1];
+    const hhmmSlot = `${String(Math.floor(slot / 60)).padStart(2, '0')}:${String(slot % 60).padStart(2, '0')}`;
+    const missing = await findStartReminderTargets(p.date);
+    if (!missing.length) return; // todos iniciaron → no se manda nada
+    await sendOnce(`admin_start_reminder:${hhmmSlot.replace(':', '')}`, p.date,
+      adminMissingText(hhmmSlot, missing.map((u) => u.name)));
+  }
+
   // ---------- Scheduler (cada minuto) ----------
   let ticking = false;
   async function tick(now = new Date()) {
@@ -545,6 +672,11 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
       } catch (e) {
         console.error('[whatsapp] start_reminder:', e.message);
       }
+      try {
+        await runAdminStartReminders(p);
+      } catch (e) {
+        console.error('[whatsapp] admin_start_reminder:', e.message);
+      }
 
       if (p.weekday >= 1 && p.weekday <= 6 && minuteOfDay >= dailyAt) {
         await runOnce('daily_summary', p.date, () => buildDailySummary(p.date));
@@ -552,6 +684,11 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
       if (p.weekday === 6 && minuteOfDay >= weeklyAt) {
         const monday = addDays(p.date, -5);
         await runOnce('weekly_summary', monday, () => buildWeeklySummary(monday));
+        try {
+          await runWorkerWeekly(monday);
+        } catch (e) {
+          console.error('[whatsapp] worker_weekly:', e.message);
+        }
       }
     } catch (e) {
       console.error('[whatsapp] scheduler:', e.message);
@@ -571,6 +708,13 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     alertAutoCut,
     alertAsk,
     alertContinue,
+    receiptStart,
+    receiptStop,
+    workerTotals,
+    mondayOf,
+    payBs,
+    bs,
+    hhmm,
     buildDailySummary,
     buildWeeklySummary,
     findLeftOn,

@@ -42,7 +42,9 @@ const DEFAULT_EVOLUTION_INSTANCE = 'precios-ferreterias';
 const MAX_QUEUE = 50;
 const REQUEST_TIMEOUT_MS = 15000;
 /** Únicos tipos de mensaje que pueden ir a un trabajador (prefijo del tag). */
-const WORKER_TAGS = ['worker_left_on', 'worker_ask', 'worker_autocut', 'worker_start_reminder'];
+const WORKER_TAGS = [
+  'worker_left_on', 'worker_ask', 'worker_autocut', 'worker_start_reminder', 'worker_receipt', 'worker_weekly'
+];
 
 function envBool(value, fallback) {
   if (value == null || String(value).trim() === '') return fallback;

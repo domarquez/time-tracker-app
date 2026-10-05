@@ -1,4 +1,4 @@
-const CACHE_NAME = 'control-horas-v9';
+const CACHE_NAME = 'control-horas-v10';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
@@ -33,7 +33,9 @@ self.addEventListener('fetch', event => {
     url.pathname.startsWith('/week-days') ||
     url.pathname.startsWith('/history') ||
     url.pathname.startsWith('/all-users') ||
-    url.pathname.startsWith('/login-admin')
+    url.pathname.startsWith('/login-admin') ||
+    url.pathname.startsWith('/admin') ||
+    url.pathname.startsWith('/webhook')
   ) {
     event.respondWith(fetch(event.request));
     return;
