@@ -207,8 +207,23 @@ async function initDB() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10,2);
   `);
 
+  // Cuenta(s) del admin: no son trabajadores (fuera de recordatorios, listas y resúmenes)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false`);
+  await markAdminByPhone();
+
   await seedWorkers();
   console.log('Base de datos lista');
+}
+
+/** Marca is_admin al usuario cuyo celular es ADMIN_WHATSAPP_PHONE (cualquier formato). Idempotente. */
+async function markAdminByPhone() {
+  const variants = phoneVariants(notifier.getConfig().phone);
+  if (!variants.length) return;
+  const r = await pool.query(
+    `UPDATE users SET is_admin = true WHERE phone = ANY($1::text[]) AND NOT is_admin RETURNING id, name`,
+    [variants]
+  );
+  for (const u of r.rows) console.log(`[admin] usuario ${u.id} (${u.name}) marcado como admin por teléfono`);
 }
 
 /** Variantes con las que un celular boliviano pudo quedar guardado en users.phone. */
@@ -1187,12 +1202,13 @@ app.post('/login-admin', (req, res) => {
 app.get('/all-users', admin.requireAdmin, async (req, res) => {
   try {
     const users = await pool.query(`
-      SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate,
+      SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin,
+             COUNT(te.id)::int AS entries,
              COALESCE(SUM(te.duration_minutes), 0) as total_minutes,
              MAX(te.start_time) as last_entry
       FROM users u
       LEFT JOIN time_entries te ON u.id = te.user_id
-      GROUP BY u.id, u.name, u.phone, u.hourly_rate
+      GROUP BY u.id, u.name, u.phone, u.hourly_rate, u.is_admin
       ORDER BY u.name
     `);
     res.json(users.rows);
