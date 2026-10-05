@@ -7,6 +7,8 @@ require('dotenv').config();
 const notifier = require('./notifier');
 const { createWhatsappReports } = require('./whatsapp-reports');
 const { laPazWall, entryDay } = require('./tz-sql');
+const { registerAdmin } = require('./admin');
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -14,7 +16,15 @@ const TZ = 'America/La_Paz';
 
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(__dirname));
+// Solo se sirven estos archivos (antes express.static exponía server.js, .env, etc.)
+const PUBLIC_FILES = new Set(['/index.html', '/admin.html', '/manifest.json', '/sw.js']);
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.use((req, res, next) => {
+  if ((req.method === 'GET' || req.method === 'HEAD') && PUBLIC_FILES.has(req.path)) {
+    return res.sendFile(path.join(__dirname, req.path));
+  }
+  next();
+});
 
 // time_entries.start_time/end_time son TIMESTAMP sin zona con hora de pared UTC.
 // Leerlos/escribirlos siempre como UTC, sin depender de la zona del proceso Node
@@ -190,8 +200,105 @@ async function initDB() {
     );
   `);
 
+  // Control del admin: quién prendió/apagó y tarifa por hora (Bs)
+  await pool.query(`
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS started_by TEXT;
+    ALTER TABLE time_entries ADD COLUMN IF NOT EXISTS stopped_by TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10,2);
+  `);
+
+  await seedWorkers();
   console.log('Base de datos lista');
 }
+
+/** Variantes con las que un celular boliviano pudo quedar guardado en users.phone. */
+function phoneVariants(raw) {
+  const canon = notifier.normalizeBoPhone(raw);
+  const typed = normalizePhone(String(raw || ''));
+  const set = new Set([typed].filter(Boolean));
+  if (canon) {
+    set.add(`+${canon}`);
+    set.add(canon);
+    set.add(canon.slice(3));
+  }
+  return [...set];
+}
+
+/** Busca un usuario por teléfono sin importar el formato (+591…, 591…, 7xxxxxxx). */
+async function findUserByPhone(raw) {
+  const variants = phoneVariants(raw);
+  if (!variants.length) return null;
+  const r = await pool.query(
+    `SELECT id, name, phone, hourly_rate::float AS hourly_rate FROM users WHERE phone = ANY($1::text[]) ORDER BY id LIMIT 1`,
+    [variants]
+  );
+  return r.rows[0] || null;
+}
+
+/**
+ * Crea (o devuelve) un trabajador por nombre + teléfono. Idempotente: si ya existe
+ * un usuario con ese celular (en cualquier formato) no se duplica.
+ * Devuelve { user, created }.
+ */
+async function upsertWorker({ name, phone, hourly_rate } = {}) {
+  const cleanName = String(name || '').trim();
+  const canon = notifier.normalizeBoPhone(phone);
+  const stored = canon ? `+${canon}` : normalizePhone(String(phone || ''));
+  if (!cleanName) throw Object.assign(new Error('Nombre requerido'), { status: 400 });
+  if (!stored) throw Object.assign(new Error('Teléfono inválido'), { status: 400 });
+  const rate = hourly_rate == null || hourly_rate === '' ? undefined : Number(hourly_rate);
+  if (rate !== undefined && (!Number.isFinite(rate) || rate < 0)) {
+    throw Object.assign(new Error('Tarifa inválida'), { status: 400 });
+  }
+
+  const existing = await findUserByPhone(stored);
+  if (existing) {
+    if (rate !== undefined) {
+      await pool.query('UPDATE users SET hourly_rate = $1 WHERE id = $2', [rate, existing.id]);
+      existing.hourly_rate = rate;
+    }
+    return { user: existing, created: false };
+  }
+  // Mismo nombre ya usado: si no tiene teléfono, se le asigna; si tiene otro, nombre con sufijo
+  const byName = await pool.query('SELECT id, name, phone FROM users WHERE lower(name) = lower($1)', [cleanName]);
+  if (byName.rows.length && !byName.rows[0].phone) {
+    const u = await pool.query(
+      `UPDATE users SET phone = $1, hourly_rate = COALESCE($2, hourly_rate) WHERE id = $3
+       RETURNING id, name, phone, hourly_rate::float AS hourly_rate`,
+      [stored, rate ?? null, byName.rows[0].id]
+    );
+    return { user: u.rows[0], created: false };
+  }
+  const finalName = byName.rows.length ? `${cleanName} (${stored.slice(-4)})` : cleanName;
+  const ins = await pool.query(
+    `INSERT INTO users (name, phone, hourly_rate) VALUES ($1, $2, $3)
+     RETURNING id, name, phone, hourly_rate::float AS hourly_rate`,
+    [finalName, stored, rate ?? null]
+  );
+  return { user: ins.rows[0], created: true };
+}
+
+/**
+ * Alta automática al arrancar (idempotente). SEED_WORKERS="Nombre:+591XXXXXXXX,Otro:7xxxxxxx".
+ * Los teléfonos van en una variable de entorno (el repo es público).
+ */
+async function seedWorkers() {
+  const raw = String(process.env.SEED_WORKERS || '').trim();
+  if (!raw) return;
+  for (const item of raw.split(',')) {
+    const i = item.lastIndexOf(':');
+    if (i <= 0) continue;
+    const name = item.slice(0, i).trim();
+    const phone = item.slice(i + 1).trim();
+    try {
+      const { user, created } = await upsertWorker({ name, phone });
+      console.log(`[seed] ${created ? 'creado' : 'ya existía'}: ${user.name} (${user.phone})`);
+    } catch (e) {
+      console.error(`[seed] ${name}: ${e.message}`);
+    }
+  }
+}
+
 initDB().catch((err) => {
   console.error('Error initDB:', err);
 });
@@ -231,10 +338,9 @@ async function handleAuth(req, res) {
   }
 
   try {
-    const existing = await pool.query(
-      'SELECT id, name, phone FROM users WHERE phone = $1',
-      [phone]
-    );
+    // Cualquier formato del mismo celular (+591…, 591…, 7xxxxxxx) es el mismo usuario
+    const found = await findUserByPhone(phone);
+    const existing = { rows: found ? [found] : [] };
 
     if (existing.rows.length) {
       const user = existing.rows[0];
@@ -267,13 +373,16 @@ async function handleAuth(req, res) {
       });
     }
 
+    // Celular boliviano: se guarda siempre como +591XXXXXXXX
+    const canonPhone = notifier.normalizeBoPhone(phone);
+    const storePhone = canonPhone ? `+${canonPhone}` : phone;
     let insertName = name;
     try {
       const result = await pool.query(
         `INSERT INTO users (name, phone, latitude, longitude)
          VALUES ($1, $2, $3, $4)
          RETURNING id, name, phone`,
-        [insertName, phone, latitude || null, longitude || null]
+        [insertName, storePhone, latitude || null, longitude || null]
       );
       return res.json({
         success: true,
@@ -284,12 +393,12 @@ async function handleAuth(req, res) {
       });
     } catch (e) {
       if (e.code === '23505') {
-        insertName = `${name} (${phone})`;
+        insertName = `${name} (${storePhone})`;
         const result = await pool.query(
           `INSERT INTO users (name, phone, latitude, longitude)
            VALUES ($1, $2, $3, $4)
            RETURNING id, name, phone`,
-          [insertName, phone, latitude || null, longitude || null]
+          [insertName, storePhone, latitude || null, longitude || null]
         );
         return res.json({
           success: true,
@@ -326,6 +435,7 @@ async function closeEntryAuto(row, { stop_reason, observation, endAt, phase } = 
          duration_minutes = $2,
          observation = COALESCE($3, observation),
          stop_reason = COALESCE($4, stop_reason),
+         stopped_by = 'auto',
          night_ask_at = NULL,
          night_ask_phase = NULL
      WHERE id = $5 AND end_time IS NULL
@@ -541,156 +651,213 @@ app.post('/location', async (req, res) => {
   }
 });
 
+const hasCoord = (v) => v != null && v !== '' && Number.isFinite(Number(v));
+
+/**
+ * Abre un turno. by = 'worker' | 'admin'. GPS obligatorio solo para el trabajador.
+ * Devuelve { ok, status, error?, entry_id?, start_time?, startAt? }.
+ */
+async function startShift(userId, { by = 'worker', latitude, longitude, at, note } = {}) {
+  const lat = hasCoord(latitude) ? Number(latitude) : null;
+  const lng = hasCoord(longitude) ? Number(longitude) : null;
+  if (by !== 'admin' && (lat == null || lng == null)) {
+    return { ok: false, status: 400, error: 'Tenés que activar la ubicación (GPS) para registrar el turno.' };
+  }
+  const user = await pool.query('SELECT id, name FROM users WHERE id = $1', [userId]);
+  if (!user.rows.length) return { ok: false, status: 404, error: 'Usuario no encontrado' };
+
+  const open = await pool.query(
+    'SELECT id, start_time FROM time_entries WHERE user_id = $1 AND end_time IS NULL LIMIT 1',
+    [userId]
+  );
+  if (open.rows.length) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'Ya hay un turno abierto',
+      entry_id: open.rows[0].id,
+      start_time: open.rows[0].start_time
+    };
+  }
+
+  // Turno nuevo siempre separado: su día es la fecha La Paz en que se prende.
+  // `at` (solo admin): registro tardío, p. ej. "empezó a las 8".
+  const now = new Date();
+  const startAt = at ? new Date(at) : now;
+  if (at) {
+    if (Number.isNaN(startAt.getTime())) return { ok: false, status: 400, error: 'Hora inválida' };
+    if (startAt.getTime() > now.getTime() + 60000) {
+      return { ok: false, status: 400, error: 'La hora de inicio no puede ser futura' };
+    }
+    const last = await pool.query(
+      'SELECT MAX(end_time) AS last_end FROM time_entries WHERE user_id = $1 AND end_time IS NOT NULL',
+      [userId]
+    );
+    const lastEnd = last.rows[0].last_end;
+    if (lastEnd && new Date(lastEnd).getTime() > startAt.getTime()) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Se superpone con el turno anterior (terminó a las ${whatsapp.hhmm(lastEnd)})`
+      };
+    }
+  }
+  const today = whatsapp.laPazParts(startAt).date;
+  let result;
+  try {
+    result = await pool.query(
+      `INSERT INTO time_entries (user_id, start_time, date, latitude, longitude, started_by, observation)
+       VALUES ($1, $5, $2::date, $3, $4, $6, $7)
+       RETURNING id, start_time`,
+      [userId, today, lat, lng, startAt.toISOString(), by, note || null]
+    );
+  } catch (e) {
+    if (e.code === '23505') return { ok: false, status: 409, error: 'Ya hay un turno abierto' };
+    throw e;
+  }
+
+  if (lat != null && by !== 'admin') {
+    await pool.query(
+      `UPDATE users SET latitude = $1, longitude = $2 WHERE id = $3`,
+      [lat, lng, userId]
+    );
+  }
+  const entryId = result.rows[0].id;
+  whatsapp.alertStart(userId, startAt, { by });
+  whatsapp.receiptStart(entryId);
+  return { ok: true, status: 200, entry_id: entryId, start_time: result.rows[0].start_time, startAt, name: user.rows[0].name };
+}
+
+/**
+ * Cierra el turno abierto (por entryId o userId). by = 'worker' | 'admin' | 'auto'.
+ * Devuelve { ok, status, error?, ...detalle }.
+ */
+async function stopShift({ entryId, userId } = {}, {
+  by = 'worker', latitude, longitude, observation, stop_reason, isAuto = false, at
+} = {}) {
+  const lat = hasCoord(latitude) ? Number(latitude) : null;
+  const lng = hasCoord(longitude) ? Number(longitude) : null;
+  // GPS obligatorio solo en apagado iniciado por el trabajador
+  if (!isAuto && by === 'worker' && (lat == null || lng == null)) {
+    return { ok: false, status: 400, error: 'Tenés que activar la ubicación (GPS) para registrar el turno.' };
+  }
+  let entry;
+  if (entryId) {
+    entry = await pool.query(
+      'SELECT id, user_id, start_time FROM time_entries WHERE id = $1 AND end_time IS NULL',
+      [entryId]
+    );
+  } else if (userId) {
+    entry = await pool.query(
+      'SELECT id, user_id, start_time FROM time_entries WHERE user_id = $1 AND end_time IS NULL ORDER BY start_time DESC LIMIT 1',
+      [userId]
+    );
+  } else {
+    return { ok: false, status: 400, error: 'entry_id o user_id requerido' };
+  }
+  if (!entry.rows.length) return { ok: false, status: 404, error: 'No hay turno abierto' };
+
+  const row = entry.rows[0];
+  const now = new Date();
+  // `at` (solo admin): registro tardío del fin, p. ej. "terminó a las 17:30"
+  const endTime = at ? new Date(at) : now;
+  const startTime = new Date(row.start_time);
+  if (at) {
+    if (Number.isNaN(endTime.getTime())) return { ok: false, status: 400, error: 'Hora inválida' };
+    if (endTime.getTime() > now.getTime() + 60000) {
+      return { ok: false, status: 400, error: 'La hora de fin no puede ser futura' };
+    }
+    if (endTime.getTime() <= startTime.getTime()) {
+      return { ok: false, status: 400, error: `La hora de fin debe ser posterior al inicio (${whatsapp.hhmm(startTime)})` };
+    }
+  }
+  const rawMinutes = Math.max(0, Math.floor((endTime - startTime) / (1000 * 60)));
+  const detail = roundingDetail(rawMinutes);
+  const minutes = detail.rounded;
+  const reason = stop_reason || (isAuto ? 'auto' : (by === 'admin' ? 'admin' : 'manual'));
+  const obs = observation || null;
+  const stoppedBy = isAuto ? 'auto' : by;
+
+  const upd = await pool.query(
+    `UPDATE time_entries
+     SET end_time = $7,
+         duration_minutes = $1,
+         end_latitude = $2,
+         end_longitude = $3,
+         observation = COALESCE($4, observation),
+         stop_reason = $5,
+         stopped_by = $8,
+         night_ask_at = NULL,
+         night_ask_phase = NULL
+     WHERE id = $6 AND end_time IS NULL
+     RETURNING id`,
+    [minutes, isAuto ? null : lat, isAuto ? null : lng, obs, reason, row.id, endTime.toISOString(), stoppedBy]
+  );
+  // Otro proceso (cron nocturno / doble click) ya lo cerró: no sumar dos veces
+  if (!upd.rows.length) return { ok: false, status: 404, error: 'No hay turno abierto' };
+
+  if (!isAuto && by === 'worker' && lat != null) {
+    await pool.query(
+      `UPDATE users SET latitude = $1, longitude = $2 WHERE id = $3`,
+      [lat, lng, row.user_id]
+    );
+  }
+
+  const weekStart = await getWeekStartLaPaz(startTime.toISOString());
+  await updateWeeklySummary(row.user_id, weekStart, minutes);
+
+  if (isAuto) {
+    whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes, entryId: row.id, endAt: endTime });
+  } else {
+    whatsapp.alertStop(row.user_id, minutes, endTime, { by });
+    whatsapp.receiptStop(row.id);
+  }
+
+  const fmt = formatHours(minutes);
+  return {
+    ok: true,
+    status: 200,
+    auto: !!isAuto,
+    user_id: row.user_id,
+    raw_minutes: detail.raw,
+    duration_minutes: minutes,
+    duration_hours: fmt.hours,
+    message: buildStopMessage(detail),
+    entry_id: row.id,
+    observation: obs,
+    stop_reason: reason,
+    stopped_by: stoppedBy,
+    end_latitude: isAuto ? null : lat,
+    end_longitude: isAuto ? null : lng
+  };
+}
+
 app.post('/start', async (req, res) => {
   const { user_id, latitude, longitude } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
-  if (latitude == null || longitude == null || latitude === '' || longitude === '') {
-    return res.status(400).json({
-      error: 'Tenés que activar la ubicación (GPS) para registrar el turno.'
-    });
-  }
-
   try {
-    const open = await pool.query(
-      'SELECT id, start_time FROM time_entries WHERE user_id = $1 AND end_time IS NULL LIMIT 1',
-      [user_id]
-    );
-    if (open.rows.length) {
-      return res.status(409).json({
-        error: 'Ya hay un turno abierto',
-        entry_id: open.rows[0].id,
-        start_time: open.rows[0].start_time
-      });
+    const r = await startShift(user_id, { by: 'worker', latitude, longitude });
+    if (!r.ok) {
+      return res.status(r.status).json({ error: r.error, entry_id: r.entry_id, start_time: r.start_time });
     }
-
-    // Turno nuevo siempre separado: su día es la fecha La Paz en que se prende
-    const startAt = new Date();
-    const today = whatsapp.laPazParts(startAt).date;
-    const result = await pool.query(
-      `INSERT INTO time_entries (user_id, start_time, date, latitude, longitude)
-       VALUES ($1, $5, $2::date, $3, $4)
-       RETURNING id, start_time`,
-      [user_id, today, latitude || null, longitude || null, startAt.toISOString()]
-    );
-
-    if (latitude != null || longitude != null) {
-      await pool.query(
-        `UPDATE users SET latitude = COALESCE($1, latitude), longitude = COALESCE($2, longitude) WHERE id = $3`,
-        [latitude, longitude, user_id]
-      );
-    }
-
-    res.json({
-      success: true,
-      entry_id: result.rows[0].id,
-      start_time: result.rows[0].start_time
-    });
-    whatsapp.alertStart(user_id, startAt);
+    res.json({ success: true, entry_id: r.entry_id, start_time: r.start_time });
   } catch (e) {
-    if (e.code === '23505') {
-      return res.status(409).json({ error: 'Ya hay un turno abierto' });
-    }
     res.status(500).json({ error: e.message });
   }
 });
 
 app.post('/stop', async (req, res) => {
-  const {
-    entry_id,
-    user_id,
-    latitude,
-    longitude,
-    observation,
-    stop_reason,
-    auto
-  } = req.body;
+  const { entry_id, user_id, latitude, longitude, observation, stop_reason, auto } = req.body;
   const isAuto = auto === true || auto === 'true' || stop_reason === 'sin_respuesta_noche'
     || stop_reason === 'medianoche';
-
-  // GPS obligatorio solo en apagado iniciado por el usuario
-  if (!isAuto && (latitude == null || longitude == null || latitude === '' || longitude === '')) {
-    return res.status(400).json({
-      error: 'Tenés que activar la ubicación (GPS) para registrar el turno.'
-    });
-  }
   try {
-    let entry;
-    if (entry_id) {
-      entry = await pool.query(
-        'SELECT id, user_id, start_time FROM time_entries WHERE id = $1 AND end_time IS NULL',
-        [entry_id]
-      );
-    } else if (user_id) {
-      entry = await pool.query(
-        'SELECT id, user_id, start_time FROM time_entries WHERE user_id = $1 AND end_time IS NULL ORDER BY start_time DESC LIMIT 1',
-        [user_id]
-      );
-    } else {
-      return res.status(400).json({ error: 'entry_id o user_id requerido' });
-    }
-
-    if (!entry.rows.length) {
-      return res.status(404).json({ error: 'No hay turno abierto' });
-    }
-
-    const row = entry.rows[0];
-    const endTime = new Date();
-    const startTime = new Date(row.start_time);
-    const rawMinutes = Math.floor((endTime - startTime) / (1000 * 60));
-    const detail = roundingDetail(rawMinutes);
-    const minutes = detail.rounded;
-    const reason = stop_reason || (isAuto ? 'auto' : 'manual');
-    const obs = observation || null;
-
-    const upd = await pool.query(
-      `UPDATE time_entries
-       SET end_time = $7,
-           duration_minutes = $1,
-           end_latitude = $2,
-           end_longitude = $3,
-           observation = COALESCE($4, observation),
-           stop_reason = $5,
-           night_ask_at = NULL,
-           night_ask_phase = NULL
-       WHERE id = $6 AND end_time IS NULL
-       RETURNING id`,
-      [minutes, isAuto ? null : (latitude ?? null), isAuto ? null : (longitude ?? null), obs, reason, row.id,
-        endTime.toISOString()]
+    const r = await stopShift(
+      { entryId: entry_id, userId: user_id },
+      { by: 'worker', latitude, longitude, observation, stop_reason, isAuto }
     );
-    // Otro proceso (cron nocturno / doble click) ya lo cerró: no sumar dos veces
-    if (!upd.rows.length) {
-      return res.status(404).json({ error: 'No hay turno abierto' });
-    }
-
-    if (!isAuto && (latitude != null || longitude != null)) {
-      await pool.query(
-        `UPDATE users SET latitude = COALESCE($1, latitude), longitude = COALESCE($2, longitude) WHERE id = $3`,
-        [latitude, longitude, row.user_id]
-      );
-    }
-
-    const weekStart = await getWeekStartLaPaz(startTime.toISOString());
-    await updateWeeklySummary(row.user_id, weekStart, minutes);
-
-    const fmt = formatHours(minutes);
-    res.json({
-      success: true,
-      auto: !!isAuto,
-      raw_minutes: detail.raw,
-      duration_minutes: minutes,
-      duration_hours: fmt.hours,
-      message: buildStopMessage(detail),
-      entry_id: row.id,
-      observation: obs,
-      stop_reason: reason,
-      end_latitude: isAuto ? null : (latitude ?? null),
-      end_longitude: isAuto ? null : (longitude ?? null)
-    });
-    if (isAuto) {
-      whatsapp.alertAutoCut(row.user_id, { observation: obs, stop_reason: reason, minutes, entryId: row.id, endAt: endTime });
-    } else {
-      whatsapp.alertStop(row.user_id, minutes, endTime);
-    }
+    if (!r.ok) return res.status(r.status).json({ error: r.error });
+    const { ok, status, user_id: _u, stopped_by: _s, ...body } = r;
+    res.json({ success: true, ...body });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1005,34 +1172,27 @@ app.get('/history/:user_id', async (req, res) => {
 });
 
 // === ADMIN ROUTES ===
-const ADMIN_USERNAME = 'diegoadmin';
-const ADMIN_PASSWORD = 'admin';
-
-/** Chequeo admin simple (mismo criterio que /login-admin; username opcional). */
-function isAdminBody(body = {}) {
-  const { username, password } = body;
-  if (password !== ADMIN_PASSWORD) return false;
-  return username == null || username === '' || username === ADMIN_USERNAME;
-}
-
-app.post('/login-admin', async (req, res) => {
-  const { username, password } = req.body;
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    res.json({ success: true, isAdmin: true });
-  } else {
-    res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
-  }
+// Panel /admin, API /admin/shift/*, /admin/status, /admin/api/*, webhook Evolution (ver admin.js)
+const admin = registerAdmin(app, {
+  pool, whatsapp, notifier, startShift, stopShift, upsertWorker, formatHours
 });
 
-app.get('/all-users', async (req, res) => {
+/** Compatibilidad: login de la pantalla vieja (usa ADMIN_PASSWORD). */
+app.post('/login-admin', (req, res) => {
+  if (admin.checkAdmin(req)) res.json({ success: true, isAdmin: true, weak_password: admin.weakPassword });
+  else res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+});
+
+/** Lista de usuarios con teléfono: solo admin. */
+app.get('/all-users', admin.requireAdmin, async (req, res) => {
   try {
     const users = await pool.query(`
-      SELECT u.id, u.name, u.phone,
+      SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate,
              COALESCE(SUM(te.duration_minutes), 0) as total_minutes,
              MAX(te.start_time) as last_entry
       FROM users u
       LEFT JOIN time_entries te ON u.id = te.user_id
-      GROUP BY u.id, u.name, u.phone
+      GROUP BY u.id, u.name, u.phone, u.hourly_rate
       ORDER BY u.name
     `);
     res.json(users.rows);
@@ -1043,7 +1203,7 @@ app.get('/all-users', async (req, res) => {
 
 /** Prueba de WhatsApp al admin. Body: { password: 'admin', username? } */
 app.post('/admin/test-whatsapp', (req, res) => {
-  if (!isAdminBody(req.body)) {
+  if (!admin.checkAdmin(req)) {
     return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
   }
   const st = notifier.status();
@@ -1066,7 +1226,7 @@ app.post('/admin/test-whatsapp', (req, res) => {
  * Body: { password, kind: 'daily'|'weekly', date?: 'YYYY-MM-DD', send?: true }
  */
 app.post('/admin/whatsapp-summary', async (req, res) => {
-  if (!isAdminBody(req.body)) {
+  if (!admin.checkAdmin(req)) {
     return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
   }
   const kind = req.body.kind === 'weekly' ? 'weekly' : 'daily';

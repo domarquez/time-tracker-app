@@ -411,15 +411,8 @@
         }
 
         function loginAsAdmin() {
-            if (prompt('🔑 Contraseña de Administrador:') === 'admin') {
-                document.getElementById('login-screen').classList.add('hidden');
-                document.getElementById('user-screen').classList.add('hidden');
-                document.getElementById('admin-screen').classList.remove('hidden');
-                updateInstallVisibility();
-                loadAllUsers();
-            } else {
-                alert('Contraseña incorrecta');
-            }
+            // Panel de admin protegido en el servidor (ADMIN_PASSWORD)
+            window.location.href = '/admin';
         }
 
         async function enterUserScreen(name, phone) {
