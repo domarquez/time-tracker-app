@@ -70,7 +70,7 @@ function registerAdmin(app, {
     const today = whatsapp.laPazParts(now).date;
     const monday = whatsapp.mondayOf(today);
     const r = await pool.query(
-      `SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate,
+      `SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin,
               o.id AS open_entry_id, o.started_by AS open_started_by,
               to_char(${laPazWall('o.start_time')}, 'HH24:MI') AS open_start_hm,
               ${entryDay('o')}::text AS open_day,
@@ -93,7 +93,7 @@ function registerAdmin(app, {
     );
     const admin = notifier.normalizeBoPhone(notifier.getConfig().phone);
     const workers = r.rows
-      .filter((u) => !(admin && notifier.normalizeBoPhone(u.phone) === admin))
+      .filter((u) => !u.is_admin && !(admin && notifier.normalizeBoPhone(u.phone) === admin))
       .map((u) => ({
         ...u,
         week_pay_bs: whatsapp.payBs(u.week_minutes, u.hourly_rate)
@@ -249,6 +249,153 @@ function registerAdmin(app, {
   };
   app.get('/admin/status', requireAdmin, statusHandler);
   app.post('/admin/status', requireAdmin, statusHandler);
+
+  // ---------- Unificar / borrar usuarios ----------
+  /**
+   * Resuelve un usuario por id o por nombre EXACTO (sensible a mayúsculas; si no hay
+   * exacto, acepta un único match sin mayúsculas/tildes). Usa el client de la transacción.
+   */
+  async function resolveUserStrict(db, ref) {
+    if (ref == null || ref === '') throw Object.assign(new Error('Usuario vacío'), { status: 400 });
+    if (typeof ref === 'number' || /^\d+$/.test(String(ref).trim())) {
+      const r = await db.query('SELECT id, name, phone, is_admin FROM users WHERE id = $1', [Number(ref)]);
+      if (!r.rows.length) throw Object.assign(new Error(`No existe el usuario id ${ref}`), { status: 404 });
+      return r.rows[0];
+    }
+    const name = String(ref);
+    const exact = await db.query('SELECT id, name, phone, is_admin FROM users WHERE name = $1', [name]);
+    if (exact.rows.length === 1) return exact.rows[0];
+    const all = await db.query('SELECT id, name, phone, is_admin FROM users');
+    const f = fold(name);
+    const loose = all.rows.filter((u) => fold(u.name) === f);
+    if (loose.length === 1) return loose[0];
+    if (!loose.length) throw Object.assign(new Error(`No existe el usuario "${name}"`), { status: 404 });
+    throw Object.assign(new Error(`"${name}" es ambiguo (${loose.map((u) => `${u.id}:${u.name}`).join(', ')}); usá el id`), { status: 409 });
+  }
+
+  /**
+   * POST /admin/users/merge { password, keep, remove: [...], rename?, mark_admin? (default true) }
+   * En una transacción: pasa los turnos y resúmenes semanales de los usuarios `remove` al
+   * usuario `keep`, deja como mucho un turno abierto, borra las marcas de notificación por
+   * usuario de los eliminados, borra los usuarios y marca `keep` como admin.
+   */
+  app.post('/admin/users/merge', requireAdmin, async (req, res) => {
+    const { keep, remove, rename } = req.body || {};
+    const markAdmin = !(req.body && (req.body.mark_admin === false || req.body.mark_admin === 'false'));
+    const list = Array.isArray(remove) ? remove : (remove != null ? [remove] : []);
+    if (keep == null || !list.length) return res.status(400).json({ success: false, error: 'keep y remove[] son obligatorios' });
+    const db = await pool.connect();
+    try {
+      await db.query('BEGIN');
+      const kept = await resolveUserStrict(db, keep);
+      const removed = [];
+      for (const ref of list) {
+        const u = await resolveUserStrict(db, ref);
+        if (u.id === kept.id) throw Object.assign(new Error(`"${ref}" es el mismo usuario que keep`), { status: 400 });
+        if (!removed.some((x) => x.id === u.id)) removed.push(u);
+      }
+      const ids = removed.map((u) => u.id);
+      await db.query('SELECT id FROM users WHERE id = ANY($1::int[]) OR id = $2 FOR UPDATE', [ids, kept.id]);
+
+      // Un solo turno abierto por usuario: si quedarían varios, se cierran los sobrantes en 0 min
+      const open = await db.query(
+        `SELECT id, user_id FROM time_entries WHERE end_time IS NULL AND (user_id = ANY($1::int[]) OR user_id = $2)
+         ORDER BY (user_id = $2) DESC, start_time DESC`,
+        [ids, kept.id]
+      );
+      const toClose = open.rows.slice(1).map((r) => r.id);
+      if (toClose.length) {
+        await db.query(
+          `UPDATE time_entries SET end_time = start_time, duration_minutes = 0, stop_reason = 'unificado',
+                  observation = COALESCE(observation, 'Cerrado al unificar usuarios'), stopped_by = 'admin',
+                  night_ask_at = NULL, night_ask_phase = NULL
+           WHERE id = ANY($1::int[])`,
+          [toClose]
+        );
+      }
+      const moved = await db.query('UPDATE time_entries SET user_id = $1 WHERE user_id = ANY($2::int[])', [kept.id, ids]);
+      await db.query('UPDATE weekly_summaries SET user_id = $1 WHERE user_id = ANY($2::int[])', [kept.id, ids]);
+      // Colapsar semanas duplicadas del usuario conservado
+      await db.query(
+        `WITH agg AS (
+           SELECT week_start, MIN(id) AS keep_id, SUM(total_minutes) AS total
+           FROM weekly_summaries WHERE user_id = $1 GROUP BY week_start HAVING COUNT(*) > 1
+         ), upd AS (
+           UPDATE weekly_summaries w SET total_minutes = agg.total FROM agg WHERE w.id = agg.keep_id RETURNING w.id
+         )
+         DELETE FROM weekly_summaries w USING agg
+         WHERE w.user_id = $1 AND w.week_start = agg.week_start AND w.id <> agg.keep_id`,
+        [kept.id]
+      );
+      // Marcas de notificación por usuario (recordatorios / semanal) de los eliminados
+      const kinds = ids.flatMap((id) => [`worker_start_reminder:${id}:%`, `worker_weekly:${id}`]);
+      const notif = await db.query('DELETE FROM notification_log WHERE kind LIKE ANY($1::text[])', [kinds]);
+      const del = await db.query('DELETE FROM users WHERE id = ANY($1::int[]) RETURNING id, name, phone', [ids]);
+
+      // Datos del conservado: teléfono del admin si no tenía, nombre nuevo opcional, is_admin
+      if (markAdmin) {
+        let phoneUpdate = null;
+        if (!kept.phone) {
+          const canon = notifier.normalizeBoPhone(notifier.getConfig().phone);
+          const taken = canon ? await db.query(
+            'SELECT 1 FROM users WHERE phone = ANY($1::text[])', [[`+${canon}`, canon, canon.slice(3)]]
+          ) : { rows: [1] };
+          if (canon && !taken.rows.length) phoneUpdate = `+${canon}`;
+        }
+        await db.query('UPDATE users SET is_admin = true, phone = COALESCE($2, phone) WHERE id = $1', [kept.id, phoneUpdate]);
+      }
+      if (rename && String(rename).trim()) {
+        await db.query('UPDATE users SET name = $1 WHERE id = $2', [String(rename).trim(), kept.id]);
+      }
+      const final = await db.query('SELECT id, name, phone, is_admin FROM users WHERE id = $1', [kept.id]);
+      await db.query('COMMIT');
+      console.log(`[admin] unificados ${ids.join(',')} → ${kept.id}`);
+      res.json({
+        success: true,
+        kept: final.rows[0],
+        removed: del.rows,
+        entries_moved: moved.rowCount,
+        open_entries_closed: toClose.length,
+        notification_marks_deleted: notif.rowCount
+      });
+    } catch (e) {
+      await db.query('ROLLBACK').catch(() => {});
+      res.status(e.status || 500).json({ success: false, error: e.code === '23505' ? `Conflicto de datos únicos: ${e.detail || e.message}` : e.message });
+    } finally {
+      db.release();
+    }
+  });
+
+  /**
+   * POST /admin/users/delete { password, user, force? }
+   * Borra un usuario. Si tiene turnos, exige force: true y borra también sus turnos y
+   * resúmenes semanales (para no perder por error el historial de un trabajador).
+   */
+  app.post('/admin/users/delete', requireAdmin, async (req, res) => {
+    const { user, force } = req.body || {};
+    const db = await pool.connect();
+    try {
+      await db.query('BEGIN');
+      const u = await resolveUserStrict(db, user);
+      const cnt = await db.query('SELECT COUNT(*)::int AS n FROM time_entries WHERE user_id = $1', [u.id]);
+      if (cnt.rows[0].n > 0 && !(force === true || force === 'true')) {
+        throw Object.assign(new Error(`${u.name} tiene ${cnt.rows[0].n} turnos; mandá force: true para borrarlos también (o usá /admin/users/merge)`), { status: 409 });
+      }
+      const te = await db.query('DELETE FROM time_entries WHERE user_id = $1', [u.id]);
+      await db.query('DELETE FROM weekly_summaries WHERE user_id = $1', [u.id]);
+      await db.query('DELETE FROM notification_log WHERE kind LIKE ANY($1::text[])',
+        [[`worker_start_reminder:${u.id}:%`, `worker_weekly:${u.id}`]]);
+      await db.query('DELETE FROM users WHERE id = $1', [u.id]);
+      await db.query('COMMIT');
+      console.log(`[admin] usuario ${u.id} (${u.name}) borrado`);
+      res.json({ success: true, deleted: { id: u.id, name: u.name, phone: u.phone }, entries_deleted: te.rowCount });
+    } catch (e) {
+      await db.query('ROLLBACK').catch(() => {});
+      res.status(e.status || 500).json({ success: false, error: e.message });
+    } finally {
+      db.release();
+    }
+  });
 
   // ---------- Pantalla ----------
   app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));

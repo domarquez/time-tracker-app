@@ -293,7 +293,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
   async function buildDailySummary(dateStr) {
     const prevDay = addDays(dateStr, -1);
     const [users, entries, open, lateness] = await Promise.all([
-      pool.query(`SELECT id, name, phone FROM users WHERE phone IS NOT NULL ORDER BY name`),
+      pool.query(`SELECT id, name, phone FROM users WHERE phone IS NOT NULL AND NOT is_admin ORDER BY name`),
       pool.query(
         `SELECT te.id, te.user_id, u.name, te.duration_minutes, te.stop_reason, te.observation,
                 (te.end_time IS NULL) AS is_open,
@@ -302,7 +302,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
                 (${laPazWall('te.end_time')}::date - $1::date) AS end_days
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
-         WHERE ${entryDay('te')} = $1::date
+         WHERE ${entryDay('te')} = $1::date AND NOT u.is_admin
            AND NOT (te.end_time IS NOT NULL AND te.end_time = te.start_time AND COALESCE(te.duration_minutes, 0) = 0)
          ORDER BY u.name, te.start_time`,
         [dateStr]
@@ -313,7 +313,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
                 to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
-         WHERE te.end_time IS NULL
+         WHERE te.end_time IS NULL AND NOT u.is_admin
          ORDER BY u.name`
       ),
       // Turnos del día anterior que terminaron después de medianoche (cuentan para ayer)
@@ -323,7 +323,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
                 to_char(${laPazWall('te.end_time')}, 'HH24:MI') AS end_hm
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
-         WHERE ${entryDay('te')} = $1::date
+         WHERE ${entryDay('te')} = $1::date AND NOT u.is_admin
            AND te.end_time IS NOT NULL
            AND ${laPazWall('te.end_time')} > $2::date::timestamp
          ORDER BY u.name, te.start_time`,
@@ -386,6 +386,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
            ON te.user_id = u.id
           AND te.end_time IS NOT NULL
           AND ${entryDay('te')} BETWEEN $1::date AND $2::date
+         WHERE NOT u.is_admin
          GROUP BY u.id, u.name, u.phone, u.hourly_rate
          HAVING COALESCE(SUM(te.duration_minutes), 0) > 0 OR bool_or(u.phone IS NOT NULL)
          ORDER BY minutes DESC, u.name`,
@@ -397,12 +398,13 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
                 te.observation, te.stop_reason
          FROM time_entries te
          JOIN users u ON u.id = te.user_id
-         WHERE te.observation IS NOT NULL AND te.observation <> ''
+         WHERE te.observation IS NOT NULL AND te.observation <> '' AND NOT u.is_admin
            AND ${entryDay('te')} BETWEEN $1::date AND $2::date
          ORDER BY day, u.name`,
         [weekStart, weekEnd]
       ),
-      pool.query(`SELECT COUNT(*)::int AS n FROM time_entries WHERE end_time IS NULL`)
+      pool.query(`SELECT COUNT(*)::int AS n FROM time_entries te JOIN users u ON u.id = te.user_id
+                  WHERE te.end_time IS NULL AND NOT u.is_admin`)
     ]);
 
     const worked = totals.rows.filter((r) => r.minutes > 0);
@@ -453,7 +455,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const r = await pool.query(
       `SELECT u.id, u.name, u.phone, u.hourly_rate, SUM(te.duration_minutes)::int AS minutes
        FROM users u JOIN time_entries te ON te.user_id = u.id
-       WHERE u.phone IS NOT NULL AND te.end_time IS NOT NULL
+       WHERE u.phone IS NOT NULL AND NOT u.is_admin AND te.end_time IS NOT NULL
          AND ${entryDay('te')} BETWEEN $1::date AND $2::date
        GROUP BY u.id, u.name, u.phone, u.hourly_rate
        HAVING SUM(te.duration_minutes) > 0
@@ -534,7 +536,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
               FLOOR(EXTRACT(EPOCH FROM (($3::timestamptz AT TIME ZONE 'UTC') - te.start_time)) / 60)::int AS raw_minutes
        FROM time_entries te
        JOIN users u ON u.id = te.user_id
-       WHERE te.end_time IS NULL
+       WHERE te.end_time IS NULL AND NOT u.is_admin
          AND ${laPazWall('te.start_time')} < ($1::date + $2::time)
        ORDER BY u.name`,
       [dateStr, cutoffHHMM, new Date(now).toISOString()]
@@ -582,7 +584,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const r = await pool.query(
       `SELECT u.id, u.name, u.phone
        FROM users u
-       WHERE u.phone IS NOT NULL
+       WHERE u.phone IS NOT NULL AND NOT u.is_admin
          AND u.name !~* '(^|[^a-záéíóúñ])(test|prueba|demo)([^a-záéíóúñ]|$)'
          AND (
            u.created_at >= $1::date - $2::int

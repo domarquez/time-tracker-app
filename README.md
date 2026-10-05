@@ -155,6 +155,19 @@ Cada inicio/fin hecho por el admin marca `time_entries.started_by` / `stopped_by
 
 Otras rutas del panel: `GET /admin/api/workers`, `POST /admin/api/workers` `{ name, phone, hourly_rate? }` (alta idempotente por celular), `POST /admin/api/workers/:id/rate` `{ hourly_rate }`, `POST /admin/api/start|stop` `{ user_id }` o `{ all: true }` (start all = los que no iniciaron hoy; stop all = todos los abiertos), `POST /admin/api/summary` `{ kind }`.
 
+### Unificar / borrar usuarios
+```bash
+# Unifica duplicados en un usuario (ids o nombre exacto; nombre ambiguo → 409, usá ids)
+curl -s -X POST $APP/admin/users/merge -H 'content-type: application/json' \
+  -d '{"password":"'$ADMIN_PASSWORD'","keep":11,"remove":[3,4,7]}'
+# Borra un usuario (si tiene turnos exige "force": true; mejor unificar)
+curl -s -X POST $APP/admin/users/delete -H 'content-type: application/json' \
+  -d '{"password":"'$ADMIN_PASSWORD'","user":12}'
+```
+`merge` corre en una transacción: pasa los turnos (`time_entries`) y `weekly_summaries` de los borrados al que se queda (si quedan varios turnos abiertos, conserva uno y cierra los demás con 0 min, `stop_reason='unificado'`), limpia las marcas de recordatorio de los borrados, borra los usuarios y marca al que queda con `is_admin = true` (opcional `mark_admin: false`, `rename: "Nuevo nombre"`). Si el que queda no tenía celular, le pone `ADMIN_WHATSAPP_PHONE`. Respuesta: `{ kept, removed, entries_moved, open_entries_closed, notification_marks_deleted }`.
+
+**`users.is_admin`**: los usuarios admin no aparecen en `/admin/status`, recordatorios al trabajador, listas "sin inicio", resúmenes diario/semanal ni alertas de 20:00. Al arrancar, el usuario cuyo celular coincide con `ADMIN_WHATSAPP_PHONE` se marca admin automáticamente. `GET /all-users` muestra todos (con `is_admin` y cantidad de turnos).
+
 ### Comandos por WhatsApp (opcional, no conectado)
 `POST /webhook/evolution?token=<EVOLUTION_WEBHOOK_TOKEN>` recibe eventos `messages.upsert` de Evolution v2. Solo procesa mensajes de `ADMIN_WHATSAPP_PHONE` (no grupos, no `fromMe`) que empiecen con un comando; **todo lo demás se ignora en silencio** (la instancia `precios-ferreterias` es compartida con el proyecto de proveedores). Dedup por id de mensaje.
 - `inicio jimi`, `inicio leo 8:30`, `inicio todos` (los que no iniciaron hoy)
