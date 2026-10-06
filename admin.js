@@ -18,7 +18,8 @@ const path = require('path');
 const { laPazWall, entryDay } = require('./tz-sql');
 
 function registerAdmin(app, {
-  pool, whatsapp, notifier, startShift, stopShift, upsertWorker, formatHours
+  pool, whatsapp, notifier, startShift, stopShift, upsertWorker, formatHours,
+  roundingDetail, getWeekStartLaPaz
 }) {
   const weakPassword = !String(process.env.ADMIN_PASSWORD || '').trim();
   if (weakPassword) {
@@ -240,6 +241,146 @@ function registerAdmin(app, {
 
   app.post('/admin/shift/start', requireAdmin, (req, res) => shiftAction('start', req, res));
   app.post('/admin/shift/stop', requireAdmin, (req, res) => shiftAction('stop', req, res));
+
+  // ---------- Corregir / borrar un turno ----------
+  /** 'HH:MM' (mismos formatos que time) del día `dateStr` (YYYY-MM-DD) en La Paz → Date | NaN. */
+  function parseDayTime(dateStr, value) {
+    const m = /^\s*(\d{1,2})(?:[:.h](\d{1,2}))?\s*h?\s*$/i.exec(String(value));
+    if (!m) return new Date(NaN);
+    const hh = Number(m[1]);
+    const mm = Number(m[2] || 0);
+    if (hh > 23 || mm > 59) return new Date(NaN);
+    return new Date(`${dateStr}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00-04:00`);
+  }
+  const given = (v) => v != null && String(v).trim() !== '';
+
+  /**
+   * POST /admin/shift/edit { password, entry_id, start?: 'HH:MM', end?: 'HH:MM', delete?: true, note? }
+   * Horas en La Paz del día del turno; si end <= start se toma como el día siguiente
+   * (turno pasada la medianoche). Recalcula duration_minutes con el mismo redondeo
+   * y ajusta weekly_summaries. Poner `end` a un turno abierto lo cierra (stopped_by admin).
+   */
+  app.post('/admin/shift/edit', requireAdmin, async (req, res) => {
+    const { entry_id, start, end, note } = req.body || {};
+    const del = req.body && (req.body.delete === true || req.body.delete === 'true');
+    const id = Number(entry_id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, error: 'entry_id requerido (número)' });
+    }
+    if (!del && !given(start) && !given(end)) {
+      return res.status(400).json({ success: false, error: 'Mandá start y/o end (HH:MM, hora La Paz) o delete: true' });
+    }
+    const client = await pool.connect();
+    const fail = async (status, error) => {
+      await client.query('ROLLBACK');
+      return res.status(status).json({ success: false, error });
+    };
+    try {
+      await client.query('BEGIN');
+      const r = await client.query(
+        `SELECT te.id, te.user_id, u.name, te.start_time, te.end_time, te.duration_minutes,
+                ${entryDay('te')}::text AS day
+         FROM time_entries te JOIN users u ON u.id = te.user_id
+         WHERE te.id = $1 FOR UPDATE OF te`,
+        [id]
+      );
+      if (!r.rows.length) return await fail(404, `No existe el turno ${id}`);
+      const e = r.rows[0];
+      const oldStart = new Date(e.start_time);
+      const oldEnd = e.end_time ? new Date(e.end_time) : null;
+      const oldMin = oldEnd ? Number(e.duration_minutes) || 0 : 0;
+      const before = {
+        start: whatsapp.hhmm(oldStart),
+        end: oldEnd ? whatsapp.hhmm(oldEnd) : null,
+        duration_hours: oldEnd ? formatHours(oldMin).hours : null
+      };
+      const weekOld = await getWeekStartLaPaz(oldStart.toISOString());
+      const weekAdd = async (week, minutes) => {
+        if (!minutes) return;
+        const u = await client.query(
+          `UPDATE weekly_summaries SET total_minutes = GREATEST(0, total_minutes + $1)
+           WHERE user_id = $2 AND week_start = $3`,
+          [minutes, e.user_id, week]
+        );
+        if (!u.rowCount && minutes > 0) {
+          await client.query(
+            'INSERT INTO weekly_summaries (user_id, week_start, total_minutes) VALUES ($1, $2, $3)',
+            [e.user_id, week, minutes]
+          );
+        }
+      };
+
+      if (del) {
+        await client.query('DELETE FROM time_entries WHERE id = $1', [id]);
+        await weekAdd(weekOld, -oldMin);
+        await client.query('COMMIT');
+        console.log(`[admin] turno ${id} de ${e.name} (${e.day} ${before.start}–${before.end || 'abierto'}) borrado`);
+        return res.json({ success: true, deleted: true, entry_id: id, worker: e.name, day: e.day, before });
+      }
+
+      const newStart = given(start) ? parseDayTime(e.day, start) : oldStart;
+      if (Number.isNaN(newStart.getTime())) return await fail(400, 'start debe ser HH:MM (hora La Paz)');
+      let newEnd = oldEnd;
+      if (given(end)) {
+        newEnd = parseDayTime(e.day, end);
+        if (Number.isNaN(newEnd.getTime())) return await fail(400, 'end debe ser HH:MM (hora La Paz)');
+        if (newEnd <= newStart) newEnd = new Date(newEnd.getTime() + 24 * 3600 * 1000); // pasó la medianoche
+      }
+      const now = Date.now();
+      if (newStart.getTime() > now + 60000) return await fail(400, 'El inicio no puede ser futuro');
+      if (newEnd && newEnd.getTime() > now + 60000) return await fail(400, 'El fin no puede ser futuro');
+      if (newEnd && newEnd <= newStart) return await fail(400, 'end debe ser posterior a start');
+      if (newEnd && newEnd - newStart > 24 * 3600 * 1000) return await fail(400, 'El turno no puede durar más de 24 h');
+
+      const overlap = await client.query(
+        `SELECT id, to_char(${laPazWall('start_time')}, 'HH24:MI') AS s, to_char(${laPazWall('end_time')}, 'HH24:MI') AS e
+         FROM time_entries
+         WHERE user_id = $1 AND id <> $2 AND start_time < $4 AND COALESCE(end_time, 'infinity') > $3
+         LIMIT 1`,
+        [e.user_id, id, newStart.toISOString(), newEnd ? newEnd.toISOString() : 'infinity']
+      );
+      if (overlap.rows.length) {
+        const o = overlap.rows[0];
+        return await fail(409, `Se superpone con el turno ${o.id} (${o.s}–${o.e || 'abierto'})`);
+      }
+
+      const minutes = newEnd ? roundingDetail(Math.floor((newEnd - newStart) / 60000)).rounded : null;
+      const closing = !oldEnd && !!newEnd;
+      const obs = `Editado por admin (antes ${before.start}–${before.end || 'abierto'})${given(note) ? `: ${String(note).trim()}` : ''}`;
+      await client.query(
+        `UPDATE time_entries
+         SET start_time = $2, end_time = $3, duration_minutes = $4,
+             observation = concat_ws(' · ', NULLIF(observation, ''), $5::text),
+             stopped_by = CASE WHEN $6 THEN 'admin' ELSE stopped_by END,
+             stop_reason = CASE WHEN $6 THEN 'admin' ELSE stop_reason END,
+             night_ask_at = CASE WHEN $6 THEN NULL ELSE night_ask_at END,
+             night_ask_phase = CASE WHEN $6 THEN NULL ELSE night_ask_phase END
+         WHERE id = $1`,
+        [id, newStart.toISOString(), newEnd ? newEnd.toISOString() : null, minutes, obs, closing]
+      );
+      const weekNew = await getWeekStartLaPaz(newStart.toISOString());
+      await weekAdd(weekOld, -oldMin);
+      await weekAdd(weekNew, minutes || 0);
+      await client.query('COMMIT');
+      const after = {
+        start: whatsapp.hhmm(newStart),
+        end: newEnd ? whatsapp.hhmm(newEnd) : null,
+        duration_hours: newEnd ? formatHours(minutes).hours : null
+      };
+      console.log(`[admin] turno ${id} de ${e.name} editado: ${before.start}–${before.end || 'abierto'} → ${after.start}–${after.end || 'abierto'}`);
+      res.json({
+        success: true, entry_id: id, worker: e.name, day: e.day, before, after,
+        duration_minutes: minutes,
+        message: `✏️ ${e.name} ${e.day}: ${after.start}–${after.end || 'abierto'}${newEnd ? ` (${after.duration_hours} h)` : ''}`
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      res.status(500).json({ success: false, error: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   const statusHandler = async (req, res) => {
     try {
       res.json(await statusPayload());
