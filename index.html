@@ -42,7 +42,7 @@
             <div class="max-w-md w-full bg-gray-800 border-2 border-amber-400 rounded-3xl p-6 shadow-2xl space-y-4">
                 <p class="text-amber-300 text-center font-bold text-xl">🌙 Turno todavía abierto</p>
                 <p id="night-modal-msg" class="text-center text-gray-100 text-lg"></p>
-                <p class="text-center text-sm text-gray-400">Si no respondés en 15 minutos, el turno se apaga solo.</p>
+                <p id="night-modal-hint" class="text-center text-sm text-gray-400">Si no respondés, el turno sigue prendido y le avisamos al admin.</p>
                 <div class="flex gap-3">
                     <button type="button" id="night-btn-continue" onclick="answerNightContinue()"
                         class="flex-1 bg-green-600 hover:bg-green-700 py-4 rounded-2xl text-lg font-bold">Seguir</button>
@@ -753,13 +753,23 @@
                 return;
             }
             if (night.ask_continue && night.phase) {
+                // El servidor dice si el corte automático está activo (por defecto NO)
+                const autoStop = night.auto_stop === true;
+                const hint = document.getElementById('night-modal-hint');
+                if (hint) {
+                    hint.textContent = autoStop
+                        ? 'Si no respondés en 15 minutos, el turno se apaga solo.'
+                        : 'Si no respondés, el turno sigue prendido y le avisamos al admin.';
+                }
                 showNightModal(night.phase, night.message);
                 const notifyKey = `${night.phase}-${(active && active.entry_id) || currentEntryId || ''}`;
                 if (lastNightNotifyKey !== notifyKey) {
                     lastNightNotifyKey = notifyKey;
                     await showLocalNotification(
                         '🌙 Turno abierto — ¿Seguís?',
-                        night.message || 'Respondé Seguir o Apagar. Sin respuesta se corta solo.',
+                        night.message || (autoStop
+                            ? 'Respondé Seguir o Apagar. Sin respuesta se corta solo.'
+                            : 'Respondé Seguir o Apagar. Si no respondés, le avisamos al admin.'),
                         `night-ask-${night.phase}`
                     );
                 }
@@ -861,7 +871,8 @@
                     action: data.action,
                     ask_continue: data.ask_continue,
                     phase: data.phase,
-                    message: data.message
+                    message: data.message,
+                    auto_stop: data.auto_stop
                 }, data.active ? { entry_id: data.entry_id } : null);
             } catch (e) {
                 console.error('night-check', e);

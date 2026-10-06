@@ -202,7 +202,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
               ${entryDay('te')}::text AS day,
               to_char(${laPazWall('te.start_time')}, 'HH24:MI') AS start_hm,
               to_char(${laPazWall('te.end_time')}, 'HH24:MI') AS end_hm,
-              te.started_by, te.stopped_by
+              te.started_by, te.stopped_by, te.start_time, (te.end_time IS NULL) AS open
        FROM time_entries te JOIN users u ON u.id = te.user_id
        WHERE te.id = $1`,
       [entryId]
@@ -266,6 +266,46 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
           { to: e.phone }
         );
       }
+    });
+  }
+
+  /** "desde 19:37" (o "desde 19:37 del 04/10" si empezó otro día) + horas corridas hasta ahora. */
+  function openSince(e, now = new Date()) {
+    const otherDay = e.day !== laPazParts(now).date ? ` del ${ddmm(e.day)}` : '';
+    const mins = Math.max(0, Math.floor((now - new Date(e.start_time)) / 60000));
+    return { desde: `${e.start_hm}${otherDay}`, horas: `${(mins / 60).toFixed(1)} h` };
+  }
+
+  /**
+   * Corte automático deshabilitado: el trabajador no respondió la pregunta de `phase`
+   * y el turno sigue prendido → aviso al admin (uno por pregunta).
+   */
+  function alertNoAnswer(entryId, phase, askLabel) {
+    if (!realtimeEnabled()) return;
+    background('alertNoAnswer', async () => {
+      const e = await entryInfo(entryId);
+      if (!e || !e.open) return;
+      const { desde, horas } = openSince(e);
+      await sendOnce(
+        `noanswer:${e.id}:${phase}`,
+        e.day,
+        `⚠️ *${e.name}* no respondió a las ${askLabel} y sigue prendido desde ${desde} (${horas}). Decime si lo apago.`
+      );
+    });
+  }
+
+  /** Corte por tope deshabilitado: el turno pasó el tope de horas → aviso al admin (uno por turno). */
+  function alertMaxShift(entryId, maxLabel) {
+    if (!realtimeEnabled()) return;
+    background('alertMaxShift', async () => {
+      const e = await entryInfo(entryId);
+      if (!e || !e.open) return;
+      const { desde, horas } = openSince(e);
+      await sendOnce(
+        `max_shift:${e.id}`,
+        e.day,
+        `⚠️ *${e.name}* lleva más de ${maxLabel} prendido (desde ${desde}, ${horas}). Decime si lo apago.`
+      );
     });
   }
 
@@ -708,6 +748,8 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     alertStart,
     alertStop,
     alertAutoCut,
+    alertNoAnswer,
+    alertMaxShift,
     alertAsk,
     alertContinue,
     receiptStart,

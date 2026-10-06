@@ -490,17 +490,32 @@ async function closeEntryAuto(row, { stop_reason, observation, endAt, phase } = 
  * cada NIGHT_ASK_EVERY_MIN minutos después de las 23:00 (default 60).
  * Solo cuentan los checkpoints posteriores al inicio del turno.
  * - En cada checkpoint se pregunta "¿Seguís?" (night_ask_phase = checkpoint).
- * - Sin respuesta en NIGHT_ASK_TIMEOUT_MIN (default 15) → corte automático con observación.
+ * - Sin respuesta en NIGHT_ASK_TIMEOUT_MIN (default 15):
+ *     AUTO_STOP_ENABLED=true  → corte automático con observación (comportamiento viejo);
+ *     AUTO_STOP_ENABLED=false (default) → NO se corta: aviso al admin (uno por pregunta)
+ *     y se vuelve a preguntar en el siguiente checkpoint.
  * - "Seguir" (/night-continue) → night_acked_phase = checkpoint; no se vuelve a
  *   preguntar hasta el siguiente.
- * - Tope de seguridad: MAX_SHIFT_HOURS (default 16) → corte automático al llegar
- *   a ese largo (end_time = inicio + tope; no se acreditan minutos de más).
+ * - Tope de seguridad: MAX_SHIFT_HOURS (default 16):
+ *     MAX_SHIFT_AUTO_STOP=true → corte automático al llegar a ese largo
+ *       (end_time = inicio + tope; no se acreditan minutos de más);
+ *     MAX_SHIFT_AUTO_STOP=false (default) → solo aviso al admin (una vez por turno).
  * Todas las horas del turno cuentan para el día en que EMPEZÓ (columna date).
  */
 function envNum(name, fallback, min) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n >= min ? n : fallback;
 }
+function envFlag(name, fallback) {
+  const v = String(process.env[name] ?? '').trim().toLowerCase();
+  if (!v) return fallback;
+  return /^(1|true|yes|si|sí|on)$/.test(v);
+}
+/** Corte automático por pregunta nocturna sin respuesta (default: deshabilitado). */
+const autoStopEnabled = () => envFlag('AUTO_STOP_ENABLED', false);
+/** Corte automático al llegar a MAX_SHIFT_HOURS (default: deshabilitado, solo aviso). */
+const maxShiftAutoStop = () => envFlag('MAX_SHIFT_AUTO_STOP', false);
+
 function nightConfig() {
   return {
     everyMin: envNum('NIGHT_ASK_EVERY_MIN', 60, 15),
@@ -564,7 +579,9 @@ async function evaluateNightForEntry(row) {
   const elapsed = nowMin - startMin;
 
   // Tope de seguridad: largo máximo del turno
-  if (elapsed >= cfg.maxShiftMin) {
+  if (elapsed >= cfg.maxShiftMin && !maxShiftAutoStop()) {
+    whatsapp.alertMaxShift(s.id, `${formatHours(cfg.maxShiftMin).hours.replace(/\.0$/, '')} h`);
+  } else if (elapsed >= cfg.maxShiftMin) {
     const endAt = new Date(new Date(s.start_time).getTime() + cfg.maxShiftMin * 60000);
     const closed = await closeEntryAuto(s, {
       stop_reason: 'tope_turno',
@@ -579,9 +596,12 @@ async function evaluateNightForEntry(row) {
   const askMin = minOfPhase(s.night_ask_phase);
   const askAgeSec = s.ask_age_sec != null ? Number(s.ask_age_sec) : null;
 
-  // Pregunta pendiente vencida sin respuesta → cortar
-  if (askMin != null && askAgeSec != null && askAgeSec >= cfg.timeoutMin * 60
-      && (acked == null || acked < askMin)) {
+  // Pregunta pendiente vencida sin respuesta → cortar (o solo avisar al admin)
+  const unanswered = askMin != null && askAgeSec != null && askAgeSec >= cfg.timeoutMin * 60
+    && (acked == null || acked < askMin);
+  if (unanswered && !autoStopEnabled()) {
+    whatsapp.alertNoAnswer(s.id, s.night_ask_phase, cpLabel(askMin));
+  } else if (unanswered) {
     const closed = await closeEntryAuto(s, {
       stop_reason: 'sin_respuesta_noche',
       observation: `Corte automático: sin respuesta a las ${cpLabel(askMin)}`,
@@ -593,7 +613,8 @@ async function evaluateNightForEntry(row) {
   }
 
   // Último checkpoint ya alcanzado y posterior al inicio del turno
-  const due = nightCheckpoints(startMin + cfg.maxShiftMin, cfg.everyMin)
+  // Sin corte por tope, se sigue preguntando cada hora aunque pase MAX_SHIFT_HOURS
+  const due = nightCheckpoints(Math.max(startMin + cfg.maxShiftMin, nowMin), cfg.everyMin)
     .filter((m) => m > startMin && m <= nowMin);
   const current = due.length ? due[due.length - 1] : null;
   if (current == null || (acked != null && acked >= current)) {
@@ -615,6 +636,7 @@ async function evaluateNightForEntry(row) {
     ask_continue: true,
     phase,
     entry_id: s.id,
+    unanswered: unanswered && askMin === current,
     message: askMessage(current)
   };
 }
@@ -863,8 +885,9 @@ app.post('/start', async (req, res) => {
 
 app.post('/stop', async (req, res) => {
   const { entry_id, user_id, latitude, longitude, observation, stop_reason, auto } = req.body;
-  const isAuto = auto === true || auto === 'true' || stop_reason === 'sin_respuesta_noche'
-    || stop_reason === 'medianoche';
+  // Con el corte automático deshabilitado, el cliente no puede pedir un apagado "auto" (sin GPS)
+  const isAuto = autoStopEnabled() && (auto === true || auto === 'true' || stop_reason === 'sin_respuesta_noche'
+    || stop_reason === 'medianoche');
   try {
     const r = await stopShift(
       { entryId: entry_id, userId: user_id },
@@ -884,6 +907,11 @@ app.post('/stop', async (req, res) => {
  */
 app.post('/auto-stop', async (req, res) => {
   const { entry_id, user_id, observation, stop_reason } = req.body;
+  if (!autoStopEnabled()) {
+    return res.status(409).json({
+      error: 'El corte automático está deshabilitado (AUTO_STOP_ENABLED=false). Apagá desde la app o pedile al admin.'
+    });
+  }
   try {
     let entry;
     if (entry_id) {
@@ -1020,7 +1048,8 @@ app.get('/active/:user_id', async (req, res) => {
         action: night.action,
         ask_continue: !!night.ask_continue,
         phase: night.phase,
-        message: night.message || null
+        message: night.message || null,
+        auto_stop: autoStopEnabled()
       }
     });
   } catch (e) {
@@ -1071,7 +1100,8 @@ app.get('/night-check/:user_id', async (req, res) => {
       ask_continue: !!night.ask_continue,
       phase: night.phase,
       action: night.action,
-      message: night.message || null
+      message: night.message || null,
+      auto_stop: autoStopEnabled()
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1189,7 +1219,8 @@ app.get('/history/:user_id', async (req, res) => {
 // === ADMIN ROUTES ===
 // Panel /admin, API /admin/shift/*, /admin/status, /admin/api/*, webhook Evolution (ver admin.js)
 const admin = registerAdmin(app, {
-  pool, whatsapp, notifier, startShift, stopShift, upsertWorker, formatHours
+  pool, whatsapp, notifier, startShift, stopShift, upsertWorker, formatHours,
+  roundingDetail, updateWeeklySummary, getWeekStartLaPaz
 });
 
 /** Compatibilidad: login de la pantalla vieja (usa ADMIN_PASSWORD). */
@@ -1276,4 +1307,6 @@ setTimeout(runNightCron, 5000);
 
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);
+  console.log(`[noche] corte por falta de respuesta: ${autoStopEnabled() ? 'SÍ' : 'no (solo aviso al admin)'}; `
+    + `corte por tope ${nightConfig().maxShiftMin / 60} h: ${maxShiftAutoStop() ? 'SÍ' : 'no (solo aviso al admin)'}`);
 });
