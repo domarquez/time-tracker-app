@@ -333,7 +333,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
   async function buildDailySummary(dateStr) {
     const prevDay = addDays(dateStr, -1);
     const [users, entries, open, lateness] = await Promise.all([
-      pool.query(`SELECT id, name, phone FROM users WHERE phone IS NOT NULL AND NOT is_admin ORDER BY name`),
+      pool.query(`SELECT id, name, phone FROM users WHERE phone IS NOT NULL AND NOT is_admin AND NOT paused ORDER BY name`),
       pool.query(
         `SELECT te.id, te.user_id, u.name, te.duration_minutes, te.stop_reason, te.observation,
                 (te.end_time IS NULL) AS is_open,
@@ -419,7 +419,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const weekEnd = addDays(weekStart, 5); // sábado
     const [totals, obs, open] = await Promise.all([
       pool.query(
-        `SELECT u.id, u.name, u.phone, u.hourly_rate,
+        `SELECT u.id, u.name, u.phone, u.hourly_rate, bool_or(u.paused) AS paused,
                 COALESCE(SUM(te.duration_minutes), 0)::int AS minutes
          FROM users u
          LEFT JOIN time_entries te
@@ -428,7 +428,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
           AND ${entryDay('te')} BETWEEN $1::date AND $2::date
          WHERE NOT u.is_admin
          GROUP BY u.id, u.name, u.phone, u.hourly_rate
-         HAVING COALESCE(SUM(te.duration_minutes), 0) > 0 OR bool_or(u.phone IS NOT NULL)
+         HAVING COALESCE(SUM(te.duration_minutes), 0) > 0 OR bool_or(u.phone IS NOT NULL AND NOT u.paused)
          ORDER BY minutes DESC, u.name`,
         [weekStart, weekEnd]
       ),
@@ -448,7 +448,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     ]);
 
     const worked = totals.rows.filter((r) => r.minutes > 0);
-    const zero = totals.rows.filter((r) => r.minutes === 0 && !isAdminPhone(r.phone));
+    const zero = totals.rows.filter((r) => r.minutes === 0 && !r.paused && !isAdminPhone(r.phone));
     const total = worked.reduce((a, r) => a + r.minutes, 0);
 
     const lines = [`📊 *Resumen semanal* ${ddmm(weekStart)}–${ddmm(weekEnd)}`];
@@ -624,7 +624,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     const r = await pool.query(
       `SELECT u.id, u.name, u.phone
        FROM users u
-       WHERE u.phone IS NOT NULL AND NOT u.is_admin
+       WHERE u.phone IS NOT NULL AND NOT u.is_admin AND NOT u.paused
          AND u.name !~* '(^|[^a-záéíóúñ])(test|prueba|demo)([^a-záéíóúñ]|$)'
          AND (
            u.created_at >= $1::date - $2::int

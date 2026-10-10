@@ -209,6 +209,7 @@ async function initDB() {
 
   // Cuenta(s) del admin: no son trabajadores (fuera de recordatorios, listas y resúmenes)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS paused BOOLEAN NOT NULL DEFAULT false`);
   await markAdminByPhone();
 
   await seedWorkers();
@@ -1233,13 +1234,13 @@ app.post('/login-admin', (req, res) => {
 app.get('/all-users', admin.requireAdmin, async (req, res) => {
   try {
     const users = await pool.query(`
-      SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin,
+      SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin, u.paused,
              COUNT(te.id)::int AS entries,
              COALESCE(SUM(te.duration_minutes), 0) as total_minutes,
              MAX(te.start_time) as last_entry
       FROM users u
       LEFT JOIN time_entries te ON u.id = te.user_id
-      GROUP BY u.id, u.name, u.phone, u.hourly_rate, u.is_admin
+      GROUP BY u.id, u.name, u.phone, u.hourly_rate, u.is_admin, u.paused
       ORDER BY u.name
     `);
     res.json(users.rows);

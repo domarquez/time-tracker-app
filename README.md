@@ -168,6 +168,9 @@ curl -s -X POST $APP/admin/shift/edit -H 'content-type: application/json' \
 ```
 Recalcula `duration_minutes` con el mismo redondeo, ajusta `weekly_summaries`, agrega a la observación `Editado por admin (antes HH:MM–HH:MM)`; poner `end` a un turno abierto lo cierra (`stopped_by = admin`). Rechaza horas futuras, turnos de más de 24 h y superposición con otro turno del mismo trabajador (409). Respuesta: `{ entry_id, worker, day, before, after, duration_minutes, message }`.
 
+### Trabajadores en pausa
+`POST /admin/users/pause {password, user: id|nombre, paused: true|false}` marca `users.paused`. Un trabajador en pausa no recibe recordatorios de inicio, no aparece en "sin inicio" (admin), en "inicio todos", ni en "Sin registro"/"Sin horas" de los resúmenes (el semanal solo lo lista si tiene horas). Su historial queda intacto y se lo puede prender a mano (admin o él mismo); eso no lo reactiva. `/admin/status` devuelve `paused: [...]` aparte de `workers` y el texto agrega `⏸️ En pausa: …`; el panel `/admin` los muestra en una sección con botón Reactivar.
+
 ### Unificar / borrar usuarios
 ```bash
 # Unifica duplicados en un usuario (ids o nombre exacto; nombre ambiguo → 409, usá ids)
