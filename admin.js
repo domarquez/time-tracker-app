@@ -71,7 +71,7 @@ function registerAdmin(app, {
     const today = whatsapp.laPazParts(now).date;
     const monday = whatsapp.mondayOf(today);
     const r = await pool.query(
-      `SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin,
+      `SELECT u.id, u.name, u.phone, u.hourly_rate::float AS hourly_rate, u.is_admin, u.paused,
               o.id AS open_entry_id, o.started_by AS open_started_by,
               to_char(${laPazWall('o.start_time')}, 'HH24:MI') AS open_start_hm,
               ${entryDay('o')}::text AS open_day,
@@ -104,7 +104,7 @@ function registerAdmin(app, {
 
   function statusText(ov) {
     const lines = [`📋 Estado ${ov.today.slice(8, 10)}/${ov.today.slice(5, 7)}`];
-    for (const w of ov.workers) {
+    for (const w of ov.workers.filter((x) => !x.paused)) {
       if (w.open_entry_id) {
         lines.push(`🟢 ${w.name}: prendido desde ${w.open_day !== ov.today ? `${w.open_day.slice(8, 10)}/${w.open_day.slice(5, 7)} ` : ''}${w.open_start_hm}${w.open_started_by === 'admin' ? ' (admin)' : ''}`);
       } else if (w.started_today) {
@@ -112,6 +112,10 @@ function registerAdmin(app, {
       } else {
         lines.push(`⚪ ${w.name}: sin inicio`);
       }
+    }
+    const paused = ov.workers.filter((x) => x.paused);
+    if (paused.length) {
+      lines.push(`⏸️ En pausa: ${paused.map((w) => w.open_entry_id ? `${w.name} (prendido desde ${w.open_start_hm})` : w.name).join(', ')}`);
     }
     return lines.join('\n');
   }
@@ -149,7 +153,7 @@ function registerAdmin(app, {
   async function statusPayload() {
     const ov = await workersOverview();
     const shifts = await todayShifts(ov.today);
-    const workers = ov.workers.map((w) => {
+    const mapW = (w) => {
       const list = shifts.get(w.id) || [];
       return {
         id: w.id,
@@ -160,10 +164,13 @@ function registerAdmin(app, {
         today_hours: formatHours(w.today_minutes).hours,
         week_hours: formatHours(w.week_minutes).hours,
         hourly_rate: w.hourly_rate,
-        week_pay_bs: w.week_pay_bs
+        week_pay_bs: w.week_pay_bs,
+        paused: !!w.paused
       };
-    });
-    return { success: true, today: ov.today, week_start: ov.week_start, weak_password: weakPassword, workers, text: statusText(ov) };
+    };
+    const workers = ov.workers.filter((w) => !w.paused).map(mapW);
+    const paused = ov.workers.filter((w) => w.paused).map(mapW);
+    return { success: true, today: ov.today, week_start: ov.week_start, weak_password: weakPassword, workers, paused, text: statusText(ov) };
   }
 
   /** 'HH:MM' (o '8', '8:5', '08.30', '8h') de HOY en La Paz → Date. La Paz no tiene horario de verano (UTC-4 fijo). */
@@ -241,6 +248,22 @@ function registerAdmin(app, {
 
   app.post('/admin/shift/start', requireAdmin, (req, res) => shiftAction('start', req, res));
   app.post('/admin/shift/stop', requireAdmin, (req, res) => shiftAction('stop', req, res));
+
+  /** POST /admin/users/pause { password, user: id|nombre, paused: true|false } */
+  app.post('/admin/users/pause', requireAdmin, async (req, res) => {
+    const { user, paused } = req.body || {};
+    if (typeof paused !== 'boolean') return res.status(400).json({ success: false, error: 'paused debe ser true o false' });
+    try {
+      const u = await resolveUserStrict(pool, user);
+      const r = await pool.query('UPDATE users SET paused = $2 WHERE id = $1 AND NOT is_admin RETURNING id, name, paused', [u.id, paused]);
+      if (!r.rows.length) return res.status(400).json({ success: false, error: 'No se puede pausar al admin' });
+      console.log(`[admin] ${r.rows[0].name} ${paused ? 'en pausa' : 'reactivado'}`);
+      res.json({ success: true, user: r.rows[0] });
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ success: false, error: e.message });
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
 
   // ---------- Corregir / borrar un turno ----------
   /** 'HH:MM' (mismos formatos que time) del día `dateStr` (YYYY-MM-DD) en La Paz → Date | NaN. */
