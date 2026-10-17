@@ -106,9 +106,9 @@
                     📍 Activar ubicación
                 </button>
                 <p id="gps-required-msg" class="hidden text-amber-300 text-sm px-2">La ubicación (GPS) es obligatoria para PRENDER y APAGAR.</p>
-                <div id="timer" class="clock text-blue-400 mt-4">00:00:00</div>
+                <div id="timer" class="clock text-blue-400 mt-4 hidden">00:00:00</div>
                 <div id="credit-line" class="text-sm text-amber-300/90 mt-2 hidden">Acreditaría: 0.0 h</div>
-                <p class="text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
+                <p id="rounding-note" class="hidden text-xs text-gray-500 mt-3 px-2">Se cuentan medias horas (&gt;20 min) y horas (&gt;50 min). ≤20 min de fracción no se acreditan.</p>
             </div>
 
             <div class="flex gap-4">
@@ -116,7 +116,8 @@
                 <button onclick="stopTimer()" id="stopBtn" disabled class="flex-1 bg-red-600 hover:bg-red-700 py-6 rounded-3xl text-xl font-bold disabled:opacity-40">APAGAR</button>
             </div>
 
-            <div class="grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
+            <!-- Totales: solo admin (a los trabajadores no se les muestran horas) -->
+            <div id="totals-box" class="hidden grid grid-cols-2 gap-4 bg-gray-700 p-6 rounded-3xl text-center">
                 <div>
                     <div class="text-gray-400 text-sm">HOY</div>
                     <div id="daily" class="text-2xl font-bold text-yellow-400">0.0 h</div>
@@ -129,7 +130,7 @@
                 </div>
             </div>
 
-            <div class="bg-gray-700 p-5 rounded-3xl">
+            <div id="week-days-box" class="hidden bg-gray-700 p-5 rounded-3xl">
                 <div class="text-gray-300 font-semibold mb-3 text-center">Día a día (Lun–Sáb)</div>
                 <div id="week-days" class="space-y-2 text-sm"></div>
             </div>
@@ -162,6 +163,16 @@
         let nightAskPhase = null;
         let nightModalVisible = false;
         let lastNightNotifyKey = null;
+        /** Solo admin ve horas (timer, acreditado, HOY/SEMANA, día a día). Lo decide el servidor. */
+        let showTotals = false;
+
+        function applyTotalsVisibility() {
+            ['totals-box', 'week-days-box', 'rounding-note', 'timer'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.toggle('hidden', !showTotals);
+            });
+            if (!showTotals) document.getElementById('credit-line').classList.add('hidden');
+        }
 
         const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
@@ -557,6 +568,10 @@
             const m = Math.floor((safe % 3600) / 60).toString().padStart(2, '0');
             const s = (safe % 60).toString().padStart(2, '0');
             document.getElementById('timer').textContent = `${h}:${m}:${s}`;
+            if (!showTotals) {
+                document.getElementById('credit-line').classList.add('hidden');
+                return;
+            }
 
             const elapsedMin = Math.floor(safe / 60);
             const credited = roundToHalfOrFullHour(elapsedMin);
@@ -614,11 +629,14 @@
             });
             const data = await res.json();
             if (data.success) {
-                const hoursLabel = data.duration_hours != null
-                    ? `${data.duration_hours} h`
-                    : `${formatDecimalHours(data.duration_minutes)} h`;
-                const msg = data.message || `Estuviste ${hoursLabel}`;
-                const bannerMsg = `Acreditado: ${hoursLabel} — ${msg}`;
+                let bannerMsg = '✅ Turno apagado';
+                if (showTotals && !data.totals_hidden && (data.duration_hours != null || data.duration_minutes != null)) {
+                    const hoursLabel = data.duration_hours != null
+                        ? `${data.duration_hours} h`
+                        : `${formatDecimalHours(data.duration_minutes)} h`;
+                    const msg = data.message || `Estuviste ${hoursLabel}`;
+                    bannerMsg = `Acreditado: ${hoursLabel} — ${msg}`;
+                }
                 showBanner(bannerMsg, 10000);
                 alert(bannerMsg);
                 resetTimerUI();
@@ -638,6 +656,10 @@
                 const d = await dRes.json();
                 const w = await wRes.json();
                 const days = await daysRes.json();
+
+                showTotals = !d.hidden && !w.hidden && !days.hidden && d.daily_hours != null;
+                applyTotalsVisibility();
+                if (!showTotals) return;
 
                 document.getElementById('daily').textContent = (d.daily_hours || '0.0') + ' h';
                 document.getElementById('daily-label').textContent = d.label || '';
@@ -729,7 +751,7 @@
             const msg = document.getElementById('night-modal-msg');
             if (msg) {
                 msg.textContent = message || (phase === '20'
-                    ? 'Pasaron las 20:00 y el turno sigue abierto. ¿Seguís contando horas?'
+                    ? 'Pasaron las 20:00 y el turno sigue abierto. ¿Seguís trabajando?'
                     : 'El turno sigue abierto. ¿Seguís trabajando o apagamos?');
             }
             if (el) el.classList.remove('hidden');
@@ -740,7 +762,7 @@
             if (!night) return;
             if (night.action === 'auto_stopped') {
                 hideNightModal();
-                const hoursLabel = night.duration_hours != null
+                const hoursLabel = showTotals && night.duration_hours != null
                     ? `${night.duration_hours} h`
                     : '';
                 const obs = night.observation || 'Corte automático nocturno';
@@ -796,7 +818,7 @@
                     hideNightModal();
                     nightAskPhase = null;
                     lastNightNotifyKey = null;
-                    showBanner(data.message || 'Seguís contando horas.', 8000);
+                    showBanner(data.message || 'Seguís trabajando.', 8000);
                 } else {
                     alert(data.error || 'No se pudo registrar Seguir');
                 }
@@ -832,10 +854,10 @@
                 const data = await res.json();
                 if (data.success) {
                     hideNightModal();
-                    const hoursLabel = data.duration_hours != null
-                        ? `${data.duration_hours} h`
-                        : `${formatDecimalHours(data.duration_minutes)} h`;
-                    const bannerMsg = `Acreditado: ${hoursLabel} — ${observation}`;
+                    let bannerMsg = `✅ Turno apagado — ${observation}`;
+                    if (showTotals && !data.totals_hidden && data.duration_hours != null) {
+                        bannerMsg = `Acreditado: ${data.duration_hours} h — ${observation}`;
+                    }
                     showBanner(bannerMsg, 10000);
                     resetTimerUI();
                     await loadStats();
