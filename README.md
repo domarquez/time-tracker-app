@@ -212,9 +212,11 @@ Tabla `users (id, name UNIQUE, phone, hourly_rate, latitude, longitude, created_
 | POST | `/night-continue` | `{ user_id, entry_id?, phase }` — Seguir en chequeo nocturno (`phase` = checkpoint en horas desde la medianoche del día de inicio: `20`, `23`, `24` = 00:00, `25` = 01:00…) |
 | GET | `/active/:user_id` | Turno abierto + flags `night` (`ask_continue`, `phase`, `auto_stopped`) |
 | GET | `/night-check/:user_id` | Solo chequeo nocturno (`ask_continue`, `phase`, `auto_stopped`) |
-| GET | `/daily/:user_id` | Total de hoy (La Paz) |
-| GET | `/weekly/:user_id` | Total lun–sáb |
-| GET | `/week-days/:user_id` | Array `{ date, hours }` lun–sáb |
+| GET | `/daily/:user_id` | Total de hoy (La Paz). Solo admin (`x-admin-password` o usuario `is_admin`); a un trabajador devuelve `{ hidden: true }` |
+| GET | `/weekly/:user_id` | Total lun–sáb (solo admin, idem) |
+| GET | `/week-days/:user_id` | Array `{ date, hours }` lun–sáb (solo admin, idem) |
+
+**Los trabajadores no ven horas totales**: ni en la app (timer, HOY/SEMANA, día a día, "Acreditado") ni por WhatsApp (el comprobante de fin solo trae la hora de salida; el semanal al trabajador está apagado salvo `WORKER_WEEKLY_RECEIPT=true`). `/stop` a un trabajador no devuelve minutos/horas; `/history/:user_id` es solo admin. Los reportes al admin y `/admin` mantienen los totales.
 | GET | `/all-users` | Admin (header `x-admin-password`): usuarios + teléfono + totales |
 | POST | `/admin/test-whatsapp` | Admin (`password`): mensaje de prueba por WhatsApp |
 | POST | `/admin/whatsapp-summary` | Admin (`password`): vista previa / envío manual del resumen diario o semanal |

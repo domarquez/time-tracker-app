@@ -245,7 +245,7 @@ async function findUserByPhone(raw) {
   const variants = phoneVariants(raw);
   if (!variants.length) return null;
   const r = await pool.query(
-    `SELECT id, name, phone, hourly_rate::float AS hourly_rate FROM users WHERE phone = ANY($1::text[]) ORDER BY id LIMIT 1`,
+    `SELECT id, name, phone, hourly_rate::float AS hourly_rate, is_admin FROM users WHERE phone = ANY($1::text[]) ORDER BY id LIMIT 1`,
     [variants]
   );
   return r.rows[0] || null;
@@ -377,6 +377,7 @@ async function handleAuth(req, res) {
         user_id: user.id,
         name: user.name,
         phone: user.phone,
+        is_admin: !!user.is_admin,
         is_new: false
       });
     }
@@ -405,6 +406,7 @@ async function handleAuth(req, res) {
         user_id: result.rows[0].id,
         name: result.rows[0].name,
         phone: result.rows[0].phone,
+        is_admin: false,
         is_new: true
       });
     } catch (e) {
@@ -421,6 +423,7 @@ async function handleAuth(req, res) {
           user_id: result.rows[0].id,
           name: result.rows[0].name,
           phone: result.rows[0].phone,
+          is_admin: false,
           is_new: true
         });
       }
@@ -654,6 +657,25 @@ async function runNightCron() {
   } catch (e) {
     console.error('night cron:', e.message);
   }
+}
+
+/**
+ * Los trabajadores NO ven horas totales (ni del día ni de la semana ni del turno).
+ * Solo se devuelven si el pedido trae la contraseña de admin (x-admin-password)
+ * o si el user_id consultado es un usuario admin (is_admin).
+ */
+async function totalsAllowed(req, userId) {
+  if (admin.checkAdmin(req)) return true;
+  if (!/^\d+$/.test(String(userId ?? ''))) return false;
+  const r = await pool.query('SELECT is_admin FROM users WHERE id = $1', [userId]);
+  return !!(r.rows[0] && r.rows[0].is_admin);
+}
+
+/** Quita minutos/horas acreditadas de una respuesta de cierre para el trabajador. */
+function stripTotals(obj) {
+  if (!obj) return obj;
+  const { raw_minutes: _r, duration_minutes: _m, duration_hours: _h, message: _msg, ...rest } = obj;
+  return { ...rest, totals_hidden: true, message: 'Turno apagado.' };
 }
 
 app.post('/register', handleAuth);
@@ -896,7 +918,8 @@ app.post('/stop', async (req, res) => {
     );
     if (!r.ok) return res.status(r.status).json({ error: r.error });
     const { ok, status, user_id: _u, stopped_by: _s, ...body } = r;
-    res.json({ success: true, ...body });
+    const allowed = await totalsAllowed(req, r.user_id);
+    res.json({ success: true, ...(allowed ? body : stripTotals(body)) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1024,18 +1047,19 @@ app.get('/active/:user_id', async (req, res) => {
     const night = await evaluateNightForEntry(row);
 
     if (night.action === 'auto_stopped') {
+      const n = {
+        action: 'auto_stopped',
+        ask_continue: false,
+        phase: night.phase || 'auto_closed',
+        observation: night.observation,
+        stop_reason: night.stop_reason,
+        duration_minutes: night.duration_minutes,
+        duration_hours: night.duration_hours,
+        message: night.message
+      };
       return res.json({
         active: null,
-        night: {
-          action: 'auto_stopped',
-          ask_continue: false,
-          phase: night.phase || 'auto_closed',
-          observation: night.observation,
-          stop_reason: night.stop_reason,
-          duration_minutes: night.duration_minutes,
-          duration_hours: night.duration_hours,
-          message: night.message
-        }
+        night: (await totalsAllowed(req, user_id)) ? n : stripTotals(n)
       });
     }
 
@@ -1083,7 +1107,7 @@ app.get('/night-check/:user_id', async (req, res) => {
     }
     const night = await evaluateNightForEntry(result.rows[0]);
     if (night.action === 'auto_stopped') {
-      return res.json({
+      const n = {
         active: false,
         ask_continue: false,
         phase: night.phase || 'auto_closed',
@@ -1093,7 +1117,8 @@ app.get('/night-check/:user_id', async (req, res) => {
         duration_minutes: night.duration_minutes,
         duration_hours: night.duration_hours,
         message: night.message
-      });
+      };
+      return res.json((await totalsAllowed(req, user_id)) ? n : stripTotals(n));
     }
     res.json({
       active: true,
@@ -1113,6 +1138,7 @@ app.get('/daily/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const today = await getTodayLaPaz();
+    if (!(await totalsAllowed(req, user_id))) return res.json({ hidden: true, date: today });
     const result = await pool.query(
       `SELECT COALESCE(SUM(duration_minutes), 0) AS total
        FROM time_entries
@@ -1137,6 +1163,7 @@ app.get('/weekly/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const weekStart = await getWeekStartLaPaz();
+    if (!(await totalsAllowed(req, user_id))) return res.json({ hidden: true, week_start: weekStart });
     // Lunes–Sábado: recalcular desde time_entries por zona La Paz
     const result = await pool.query(
       `SELECT COALESCE(SUM(duration_minutes), 0) AS total
@@ -1164,6 +1191,7 @@ app.get('/week-days/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const weekStart = await getWeekStartLaPaz();
+    if (!(await totalsAllowed(req, user_id))) return res.json({ hidden: true, week_start: weekStart, days: [] });
     const result = await pool.query(
       `WITH days AS (
          SELECT generate_series($2::date, $2::date + INTERVAL '5 days', INTERVAL '1 day')::date AS day
@@ -1207,6 +1235,8 @@ app.get('/week-days/:user_id', async (req, res) => {
 app.get('/history/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
+    // Historial con duraciones/notas internas: solo admin
+    if (!(await totalsAllowed(req, user_id))) return res.status(403).json({ error: 'Solo admin' });
     const result = await pool.query(
       'SELECT * FROM time_entries WHERE user_id = $1 ORDER BY start_time DESC LIMIT 50',
       [user_id]

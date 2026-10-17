@@ -13,7 +13,7 @@
  *    (default 08:00,08:30,09:00,09:30,10:00,10:30,11:30,12:30,13:30,14:30), solo si falta alguien
  *  - Resumen diario:  lunes a sábado, DAILY_SUMMARY_TIME  (default 21:30)
  *  - Resumen semanal: sábado,         WEEKLY_SUMMARY_TIME (default 21:45), con Bs si hay tarifa;
- *    y a cada trabajador sus horas de la semana (WORKER_WEEKLY_RECEIPT, default true)
+ *    (a los trabajadores NO se les mandan horas totales; WORKER_WEEKLY_RECEIPT=true lo reactiva)
  * Si el servidor estuvo caído a esa hora, se envía en cuanto vuelve
  * (mientras sea el mismo día en La Paz).
  */
@@ -178,10 +178,10 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
     background('receiptStop', async () => {
       const e = await entryInfo(entryId);
       if (!e || !e.phone || !e.end_hm) return;
-      const t = await workerTotals(e.user_id, e.day);
       const por = e.stopped_by === 'admin' ? ' (registrado por el admin)' : '';
+      // Al trabajador nunca se le informan horas totales (ni del día ni de la semana)
       await sendOnce(`worker_receipt:${e.id}:stop`, e.day,
-        `🔴 Fin registrado ${e.end_hm} — ${h(t.day_min)} hoy, ${h(t.week_min)} esta semana${por}`, { to: e.phone });
+        `🔴 Fin registrado ${e.end_hm} — ${e.name}${por}`, { to: e.phone });
     });
   }
 
@@ -262,7 +262,7 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
         await sendOnce(
           `worker_autocut:${e.id}`,
           e.day,
-          `Tu turno se apagó automáticamente a las ${at} ${porque}. Se acreditaron ${h(minutes || 0)}. ${appUrl()}`,
+          `Tu turno se apagó automáticamente a las ${at} ${porque}. ${appUrl()}`,
           { to: e.phone }
         );
       }
@@ -488,8 +488,10 @@ function createWhatsappReports({ pool, TZ, formatHours }) {
 
   /** Comprobante semanal a cada trabajador con horas (sábado, junto al resumen). */
   async function runWorkerWeekly(monday) {
+    // Apagado por defecto: a los trabajadores no se les informan horas totales.
+    // Solo se envía con WORKER_WEEKLY_RECEIPT=true explícito.
     const v = process.env.WORKER_WEEKLY_RECEIPT;
-    if (v != null && /^(0|false|no|off)$/i.test(v.trim())) return;
+    if (v == null || !/^(1|true|yes|si|sí|on)$/i.test(v.trim())) return;
     if (!notifier.workerAlertsEnabled()) return;
     const sat = addDays(monday, 5);
     const r = await pool.query(
