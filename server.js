@@ -749,16 +749,23 @@ async function startShift(userId, { by = 'worker', latitude, longitude, at, note
     if (startAt.getTime() > now.getTime() + 60000) {
       return { ok: false, status: 400, error: 'La hora de inicio no puede ser futura' };
     }
-    const last = await pool.query(
-      'SELECT MAX(end_time) AS last_end FROM time_entries WHERE user_id = $1 AND end_time IS NOT NULL',
-      [userId]
+    // Rechaza si el inicio cae dentro de otro turno (permite insertar un día pasado
+    // aunque ya existan turnos posteriores, p. ej. cargar el lunes cuando ya está el martes).
+    const conflict = await pool.query(
+      `SELECT id, start_time, end_time FROM time_entries
+       WHERE user_id = $1
+         AND start_time <= $2::timestamptz
+         AND COALESCE(end_time, 'infinity'::timestamptz) > $2::timestamptz
+       LIMIT 1`,
+      [userId, startAt.toISOString()]
     );
-    const lastEnd = last.rows[0].last_end;
-    if (lastEnd && new Date(lastEnd).getTime() > startAt.getTime()) {
+    if (conflict.rows.length) {
+      const c = conflict.rows[0];
+      const endLabel = c.end_time ? whatsapp.hhmm(c.end_time) : 'abierto';
       return {
         ok: false,
         status: 409,
-        error: `Se superpone con el turno anterior (terminó a las ${whatsapp.hhmm(lastEnd)})`
+        error: `Se superpone con el turno anterior (${whatsapp.hhmm(c.start_time)}–${endLabel})`
       };
     }
   }
@@ -829,6 +836,17 @@ async function stopShift({ entryId, userId } = {}, {
     }
     if (endTime.getTime() <= startTime.getTime()) {
       return { ok: false, status: 400, error: `La hora de fin debe ser posterior al inicio (${whatsapp.hhmm(startTime)})` };
+    }
+    const overlap = await pool.query(
+      `SELECT id FROM time_entries
+       WHERE user_id = $1 AND id <> $2
+         AND start_time < $4::timestamptz
+         AND COALESCE(end_time, 'infinity'::timestamptz) > $3::timestamptz
+       LIMIT 1`,
+      [row.user_id, row.id, startTime.toISOString(), endTime.toISOString()]
+    );
+    if (overlap.rows.length) {
+      return { ok: false, status: 409, error: `Se superpone con el turno ${overlap.rows[0].id}` };
     }
   }
   const rawMinutes = Math.max(0, Math.floor((endTime - startTime) / (1000 * 60)));
