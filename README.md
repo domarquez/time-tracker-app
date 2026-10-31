@@ -134,7 +134,7 @@ Los envíos pasan por una cola en memoria (≥ 8 s + 0–3 s aleatorios entre me
 `https://<app>/admin` (botón “👑 Administrador” de la app). Pide `ADMIN_PASSWORD` (se guarda solo en la pestaña). Muestra por trabajador: estado (🟢 prendido / ✅ trabajó hoy / ⚪ sin inicio), turnos de hoy con hora de entrada–salida y si los registró el admin, horas de hoy y de la semana, Bs de la semana (si tiene tarifa). Botones PRENDER/APAGAR con **hora opcional** (registro tardío), “Prender a los que faltan”, registrar trabajador (nombre + celular + tarifa), guardar tarifa y vista previa de resúmenes. Se refresca cada 30 s.
 
 ### API para curl / asistente
-Contraseña en el body (`password`) o en el header `x-admin-password`. `worker` = nombre (sin importar mayúsculas/tildes; exacto, primer nombre, prefijo o contiene) o celular (`+591 7…`, `7…`) o id. `time` = `HH:MM` de **hoy en La Paz** (opcional; no puede ser futura; un inicio no puede superponerse con el turno anterior; un fin debe ser posterior al inicio). `note` queda como observación del turno.
+Contraseña en el body (`password`) o en el header `x-admin-password`. `worker` = nombre (sin importar mayúsculas/tildes; exacto, primer nombre, prefijo o contiene) o celular (`+591 7…`, `7…`) o id. `time` = `HH:MM` en La Paz (opcional si es ahora; no puede ser futura; un inicio no puede caer dentro de otro turno; un fin debe ser posterior al inicio). `date` = `YYYY-MM-DD` opcional (día La Paz, no futuro): con `date` hace falta `time` y se registra ese día pasado (útil para cargar un lunes cuando ya está el martes). `note` queda como observación del turno.
 
 ```bash
 APP=https://time-tracker-app-production-2a17.up.railway.app
@@ -147,6 +147,11 @@ curl -s -X POST $APP/admin/shift/start -H 'content-type: application/json' \
 # Jimi terminó a las 17:30
 curl -s -X POST $APP/admin/shift/stop -H 'content-type: application/json' \
   -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"jimi","time":"17:30"}'
+# Cargar un día pasado (ej. lunes 26)
+curl -s -X POST $APP/admin/shift/start -H 'content-type: application/json' \
+  -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"jimi","date":"2026-10-26","time":"11:00"}'
+curl -s -X POST $APP/admin/shift/stop -H 'content-type: application/json' \
+  -d '{"password":"'"$ADMIN_PASSWORD"'","worker":"jimi","date":"2026-10-26","time":"19:40"}'
 # Estado de hoy
 curl -s $APP/admin/status -H "x-admin-password: $ADMIN_PASSWORD"
 ```

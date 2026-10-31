@@ -208,10 +208,29 @@ function registerAdmin(app, {
   }
 
   async function shiftAction(kind, req, res) {
-    const { worker, time, note, latitude, longitude } = req.body || {};
+    const { worker, time, note, latitude, longitude, date } = req.body || {};
     try {
-      const at = parseTodayTime(time);
-      if (Number.isNaN(at)) return res.status(400).json({ success: false, error: 'time debe ser HH:MM (hora La Paz de hoy)' });
+      let at;
+      const dateStr = date == null ? '' : String(date).trim();
+      if (dateStr) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+          return res.status(400).json({ success: false, error: 'date debe ser YYYY-MM-DD (día La Paz)' });
+        }
+        const today = whatsapp.laPazParts().date;
+        if (dateStr > today) {
+          return res.status(400).json({ success: false, error: 'date no puede ser futuro' });
+        }
+        if (time == null || String(time).trim() === '') {
+          return res.status(400).json({ success: false, error: 'Con date hace falta time (HH:MM)' });
+        }
+        at = parseDayTime(dateStr, time);
+        if (Number.isNaN(at.getTime())) {
+          return res.status(400).json({ success: false, error: 'time debe ser HH:MM (hora La Paz)' });
+        }
+      } else {
+        at = parseTodayTime(time);
+        if (Number.isNaN(at)) return res.status(400).json({ success: false, error: 'time debe ser HH:MM (hora La Paz de hoy)' });
+      }
       const rw = await resolveWorker(worker);
       if (!rw.worker) return res.status(rw.status).json({ success: false, error: rw.error, candidates: rw.candidates });
       const w = rw.worker;
